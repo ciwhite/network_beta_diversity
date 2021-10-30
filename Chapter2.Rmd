@@ -1,0 +1,3142 @@
+---
+title: Beta Diversity of Plants, Pollinators and their Interaction Networks along
+  Human Disturbance Gradients
+author: "Cian White"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: '4'
+  html_notebook:
+    number_sections: no
+    theme: flatly
+    toc: yes
+    toc_depth: 4
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+---
+
+# Aim
+
+To investigate beta diversity of plant, pollinator and networks along human disturbance gradients
+
+Using indices that take presence absence into account as no method to calculate abundance based dissimilarity measures for networks exist.
+
+ <center>
+![ human disturbance gradients](Pollinator_Study_Map.png)
+</center>
+
+
+loading
+```{r echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(betalink)
+library(bipartite)
+library(plyr)
+library(dplyr)
+library("vegan")
+library(betapart)
+library(tidyverse)
+library(reshape2)
+library(kableExtra)
+
+network <- read.csv("Cian_White_Interaction_Data_Full.csv")
+
+#have to change a wrong value
+network$Site_ID[network$X == 1949] <- 11
+network$FlowerAbundancePerPlantSpecies[network$X == 1794] <- 10
+network$FlowerVisitorSpecies[network$X == 729] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 829] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 839] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 905] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 922] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 925] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 934] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 1881] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 2298] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies <- gsub(" ", ",", network$FlowerVisitorSpecies)
+
+network$FlowerVisitorSpecies <- as.factor(network$FlowerVisitorSpecies)
+levels(network$FlowerVisitorSpecies)
+
+
+#creating dataframe with site ids and names for reference
+network %>%
+  select(Site_Name, Site_ID)  %>%
+  arrange(Site_ID)  %>%
+  unique() -> Names
+
+#taking out networks from each site (aggregated by month)
+netlist <- frame2webs(network, varnames = c("PlantSpecies",
+                                            "FlowerVisitorSpecies",
+                                            "Site_ID",
+                                            "VisitationFrequency"),
+                      type.out = "list", emptylist = TRUE)
+
+
+#creates I graph objects from the netlist dataframes
+networks <- prepare_networks(netlist, directed = FALSE)
+
+names <- name_networks(as.character(Names$Site_Name)) 
+
+# plant community
+network %>%
+  select(Site_ID, PlantSpecies, FlowerAbundancePerPlantSpecies) %>%
+  mutate(Group = 1) %>%
+   frame2webs(varnames = c("Site_ID",
+                                            "PlantSpecies",
+                                            "Group",
+                                            "FlowerAbundancePerPlantSpecies"),
+                      type.out = "array",
+                      emptylist = TRUE) -> plant_community
+plant_community <- as.data.frame(plant_community)
+colnames(plant_community) <- gsub(".1", "", colnames(plant_community))
+#setting the apis at site three to correct abundance
+plant_community$Hebe.agg[11] <- 0
+plant_community$Oxalis.debilis[11] <- 0
+plant_community$Vicia.sepium[18] <- 4
+#write.csv(plant_community, "Plant_Community.csv")
+
+# pollinator community
+network %>%
+  select(Site_ID, FlowerVisitorSpecies, VisitationFrequency) %>%
+  mutate(Group = 1) %>%
+   frame2webs(varnames = c("Site_ID",
+                                            "FlowerVisitorSpecies",
+                                            "Group",
+                                            "VisitationFrequency"),
+                      type.out = "array",
+                      emptylist = TRUE) -> pollinator_community
+pollinator_community <- as.data.frame(pollinator_community)
+colnames(pollinator_community) <- gsub(".1", "", colnames(pollinator_community))
+#setting the apis at site three to correct abundance
+pollinator_community$Apis.mellifera[3] <- 9
+#setting the diptera at site three to correct abundance
+pollinator_community$Diptera[7]  <- 47
+#setting the meadow brown at site 8 to correct abundance
+pollinator_community$Meadow.brown[8] <- 1
+#setting the bombus luc agg at site 11 to correct abundance
+pollinator_community$`Bombus.lucorum(agg)`[11] <- 18
+#setting the bombus pratorum at site 11 to correct abundance
+pollinator_community$Bombus.pratorum[11] <- 5
+#setting the bombus pratorum at site 11 to correct abundance
+pollinator_community$Bombus.pratorum[11] <- 5
+
+#write.csv(pollinator_community, "Pollinator_Community.csv")
+
+```
+
+
+Custom functions
+```{r echo=FALSE, message=FALSE, results='hide'}
+###
+#modified function from betalink package (Poisot et al. 2012) to calculate the the proportion of interaction turnover due to rewiring and species driven interaction turnover as per Novotny(2009). See Frund (2021). Also calculate presence absense based network beta diversity
+###
+
+
+betalink_mod <- function (n1, n2, bf = B01, net1, net2) {
+    net1[net1 > 1] <- 1
+    net2[net2 > 1] <- 1
+    v1 <- igraph::V(n1)$name
+    v2 <- igraph::V(n2)$name
+    vs <- v1[v1 %in% v2]
+    beta_S <- bf(betapart(v1, v2))
+    e1 <- plyr::aaply(igraph::get.edgelist(n1), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--", paste = "_"))
+    e2 <- plyr::aaply(igraph::get.edgelist(n2), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--", paste = "_"))
+    beta_WN <- bf(betapart(e1, e2))
+      sn1 <- igraph::induced.subgraph(n1, which(igraph::V(n1)$name %in% 
+                                                  vs))
+      sn2 <- igraph::induced.subgraph(n2, which(igraph::V(n2)$name %in% 
+                                                  vs))
+      se1 <- plyr::aaply(igraph::get.edgelist(sn1), 1, function(x) stringr::str_c(x, 
+                                                                                  collapse = "--", paste = "_"))
+      se2 <- plyr::aaply(igraph::get.edgelist(sn2), 1, function(x) stringr::str_c(x, 
+                                                                                  collapse = "--", paste = "_"))
+      
+      I_rewired <- betapart(se1, se2)$b+betapart(se1, se2)$c
+      I_total <- betapart(e1, e2)$b+betapart(e1, e2)$c
+      I_turnover <- I_total - I_rewired
+      
+      Prop_rewired <- I_rewired/I_total
+      Prop_turn <- I_turnover/I_total
+      
+      plants_n1 <- igraph::V(n1)$name[1:dim(net1)[1]] 
+      plants_n2 <- igraph::V(n2)$name[1:dim(net2)[1]]
+      plants_shared <- plants_n1[plants_n1 %in% plants_n2]
+      non_shared_plants_n1 <- setdiff(plants_n1,plants_shared)
+      non_shared_plants_n2 <- setdiff(plants_n2,plants_shared)
+      
+      pols_n1 <- igraph::V(n1)$name[(dim(net1)[1]+1):length(v1)] 
+      pols_n2 <- igraph::V(n2)$name[(dim(net2)[1]+1):length(v2)] 
+      pols_shared <- pols_n1[pols_n1 %in% pols_n2]
+      non_shared_pols_n1 <- setdiff(pols_n1,pols_shared)
+      non_shared_pols_n2 <- setdiff(pols_n2,pols_shared)
+      
+      plants_sn1_pol_share <- igraph::induced.subgraph(n1, which(igraph::V(n1)$name %in%
+                                                                             c(non_shared_plants_n1, pols_shared)))
+      
+      plants_sn2_pol_share <- igraph::induced.subgraph(n2, which(igraph::V(n2)$name %in%
+                                                                             c(non_shared_plants_n2, pols_shared)))
+      
+      
+      plants_se1_pol_share <- plyr::aaply(igraph::get.edgelist(plants_sn1_pol_share), 1, function(x) stringr::str_c(x, 
+                                                                                                                    collapse = "--", paste = "_"))
+      plants_se2_pol_share <- plyr::aaply(igraph::get.edgelist(plants_sn2_pol_share), 1, function(x) stringr::str_c(x, 
+                                                                                                                    collapse = "--", paste = "_"))
+      
+      
+      pols_sn1_plants_share <- igraph::induced.subgraph(n1,  which(igraph::V(n1)$name %in%
+                                                                               c(non_shared_pols_n1, plants_shared)))
+      pols_sn2_plants_share <- igraph::induced.subgraph(n2,  which(igraph::V(n2)$name %in%
+                                                                               c(non_shared_pols_n2, plants_shared)))
+      pols_se1_plants_share <- plyr::aaply(igraph::get.edgelist(pols_sn1_plants_share), 1, function(x) stringr::str_c(x, 
+                                                                                                                      collapse = "--", paste = "_"))
+      pols_se2_plants_share <- plyr::aaply(igraph::get.edgelist(pols_sn2_plants_share), 1, function(x) stringr::str_c(x, 
+                                                                                                                      collapse = "--", paste = "_"))
+      
+      
+      non_sn1 <- igraph::induced.subgraph(n1,  which(igraph::V(n1)$name %in%
+                                                                 c(non_shared_pols_n1, non_shared_plants_n1)))
+      non_sn2 <- igraph::induced.subgraph(n2,  which(igraph::V(n2)$name %in%
+                                                                 c(non_shared_pols_n2, non_shared_plants_n2)))
+      non_se1 <- plyr::aaply(igraph::get.edgelist(non_sn1), 1, function(x) stringr::str_c(x, 
+                                                                                          collapse = "--", paste = "_"))
+      non_se2 <- plyr::aaply(igraph::get.edgelist(non_sn2), 1, function(x) stringr::str_c(x, 
+                                                                                          collapse = "--", paste = "_"))
+      
+      beta_pol_turn <- (betapart(pols_se1_plants_share,pols_se2_plants_share))
+      beta_plant_turn <- (betapart(plants_se1_pol_share,plants_se2_pol_share))
+      beta_non <- betapart(non_se1,non_se2)
+      
+      uniqueA <- sum(beta_pol_turn$b, beta_plant_turn$b, beta_non$b)
+      uniqueB <- sum(beta_pol_turn$c, beta_plant_turn$c, beta_non$c)
+      
+      tpol <- sum(beta_pol_turn$b, beta_pol_turn$c)
+      tpla <- sum(beta_plant_turn$b, beta_plant_turn$c)
+      tnon <- sum(beta_non$b, beta_non$c)
+      
+      tspecies <- sum(tpol, tpla, tnon)
+      
+      prop_pol <- tpol/tspecies
+      prop_plant <- tpla/tspecies
+      prop_both <- tnon/tspecies
+
+    return(list(S = beta_S, WN = beta_WN, Rewire = Prop_rewired, Turnover = Prop_turn, Pol_turn = prop_pol, Plant_turn = prop_plant, Both_turn = prop_both))
+}
+
+###
+#modified 'network_betadiversity' function from betalink package (Poisot 2012) to calculate the betalink_mod function to a list of network
+###
+network_betadiversity_mod <- function (I_nets, bi_nets, complete = FALSE, ...) {
+  N <- name_networks(I_nets)
+  beta <- NULL
+  stop_at <- ifelse(complete, length(I_nets), length(I_nets) - 1)
+  for (i in c(1:stop_at)) {
+    start_at <- ifelse(complete, 1, i + 1)
+    inner_stop <- length(I_nets)
+    inner_steps <- c(start_at:inner_stop)
+    inner_steps <- inner_steps[which(inner_steps != i)]
+    for (j in inner_steps) {
+      b <- betalink_mod(I_nets[[i]], I_nets[[j]], bf = B01, bi_nets[[i]], bi_nets[[j]])
+      b$i <- names(I_nets)[i]
+      b$j <- names(I_nets)[j]
+      beta <- rbind(beta, rbind(unlist(b)))
+    }
+  }
+  if (NROW(beta) == 1) {
+    beta <- data.frame(t(beta[, c("i", "j", "S", "WN", 
+                                   "Rewire", "Turnover", "Pol_turn",
+                                  "Plant_turn", "Both_turn")]))
+  }
+  else {
+    beta <- data.frame(beta)
+    colnames(beta) <-  c("S", "WN", 
+                        "Rewire", "Turnover", "Pol_turn",
+                        "Plant_turn", "Both_turn","i", "j")
+  }
+  beta$S <- as.numeric(as.vector(beta$S))
+  beta$WN <- as.numeric(as.vector(beta$WN))
+  beta$Rewire <- as.numeric(as.vector(beta$Rewire))
+  beta$Turnover <- as.numeric(as.vector(beta$Turnover))
+  beta$Pol_turn <- as.numeric(as.vector(beta$Pol_turn))
+  beta$Plant_turn <- as.numeric(as.vector(beta$Plant_turn))
+  beta$Both_turn <- as.numeric(as.vector(beta$Both_turn))
+  return(beta)
+}
+
+###
+## function to convert a dist object to a dataframe
+###
+
+dist_to_frame <- function(inDist) {
+  if (class(inDist) != "dist") stop("wrong input type")
+  A <- attr(inDist, "Size")
+  B <- if (is.null(attr(inDist, "Labels"))) sequence(A) else attr(inDist, "Labels")
+  if (isTRUE(attr(inDist, "Diag"))) attr(inDist, "Diag") <- FALSE
+  if (isTRUE(attr(inDist, "Upper"))) attr(inDist, "Upper") <- FALSE
+  data.frame(
+    row = B[unlist(lapply(sequence(A)[-1], function(x) x:A))],
+    col = rep(B[-length(B)], (length(B)-1):1),
+    value = as.vector(inDist))
+}
+
+
+###
+## function to convert output of beta.pair function from the betapart package (Baselga et al. 2020)
+###
+
+beta.pair_mod <- function(x, index.family) {
+  pair <- beta.pair(x, index.family = index.family)
+  dist1 <- dist_to_frame(pair[[1]])
+  colnames(dist1) <- c("row", "col", "SIM")
+  dist2 <- dist_to_frame(pair[[2]])
+  colnames(dist2) <- c("row", "col", "SNE")
+  dist3 <- dist_to_frame(pair[[3]])
+  colnames(dist3) <- c("row", "col", "SOR")
+  Comb1 = full_join(dist1, dist2)
+  Comb2 = full_join(Comb1, dist3)
+  return(Comb2)
+}
+
+
+beta.pair.abund_mod <- function(x, index.family) {
+  pair <- beta.pair.abund(x, index.family = index.family)
+  dist1 <- dist_to_frame(pair[[1]])
+  colnames(dist1) <- c("row", "col", "bal")
+  dist2 <- dist_to_frame(pair[[2]])
+  colnames(dist2) <- c("row", "col", "gra")
+  dist3 <- dist_to_frame(pair[[3]])
+  colnames(dist3) <- c("row", "col", "bray")
+  Comb1 = full_join(dist1, dist2)
+  Comb2 = full_join(Comb1, dist3)
+  return(Comb2)
+}
+
+
+###
+##function to populate a matrix of interactions, based on probability of interaction and constrained by the number of interactions at that site, and ensuring that the network dimensions remain the same by assigning an interaction to each row
+###
+
+
+mgen_mod<-function(m,n,e=TRUE,zs=FALSE){
+
+  web <- m/sum(m) #probability matrix
+  mac <- matrix(cumsum(web), nrow(web), ncol(web))#cumulative probability matrix
+  mint<-matrix(0,nrow(web),ncol(web)) #Interaction matrix
+
+  if (zs==FALSE){
+    for (i in seq_len(nrow(web))){
+      c1<-sample(ncol(web),replace=T,prob=colSums(web)); c1<-c1[1]
+      mint[i,c1]<-1
+    }
+    for (i in seq_len(ncol(m))){
+      r1<-sample(nrow(m),replace=T,prob=rowSums(m)); r1<-r1[1]
+      mint[r1,i]<-1
+    }
+  }
+  while(sum(mint)<n){
+    rand<-runif(1,0,1)
+    ri<-min(which(mac>=rand))
+    mint[ri]<-mint[ri]+1
+  }
+  #if((e==T)&(zs=T)) mint<-mred(mint)
+  return(mint)
+}
+
+
+###
+##creating null models where I shuffle all the plants, pollinators and interactions based on their frequency of occurance
+###
+
+null_network <- function(n, Number.of.Sites, plant, pol, meta, net_list){
+  Null_networks <- list()
+  if ((max(pol) > 1) == TRUE){
+    pol[pol > 1] <- 1
+  } #converting to occurance absense matrix
+  if ((max(plant) > 1) == TRUE){
+    plant[plant > 1] <- 1
+  } #converting to occurance absense matrix
+  
+  Null_pol <- vegan::nullmodel(pol, method = "r1") %>% 
+    simulate(nsim = n) #creating null pollinator community
+  pol_names <- colnames(pol)
+  
+  Null_pla <- vegan::nullmodel(plant, method = "r1") %>% 
+    simulate(nsim = n)  #creating null plant community
+  pla_names <- colnames(plant)
+  
+  pol_com <- list()
+  pla_com <- list()
+  null_net1 <- list()
+  Null <- list()
+  Null_networks <- list()
+  
+  for (i in seq_len(Number.of.Sites)){
+    for (e in seq_len(n)){
+      
+      pol_com[[e]] <- as.integer(Null_pol[i,,e])
+      names(pol_com[[e]]) <- pol_names 
+      pol_com[[e]] <- pol_com[[e]][pol_com[[e]] >0]
+      
+      pla_com[[e]] <- as.integer(Null_pla[i,,e])
+      names(pla_com[[e]]) <- pla_names 
+      pla_com[[e]] <- pla_com[[e]][pla_com[[e]] > 0] 
+      
+      #subsetting the meta network based on the species chosen in the random draws
+      null_net1[[e]] <- meta[names(pla_com[[e]]), names(pol_com[[e]])]
+      
+      Null[[e]] <- mgen_mod(null_net1[[e]], sum(colSums(net_list[[i]])))
+      dimnames(Null[[e]]) <- list(rownames(null_net1[[e]]), colnames(null_net1[[e]]))
+    }
+    Null_networks[[i]] <- Null
+  }
+  return(Null_networks)
+}
+
+
+###
+# Function to calculate the amount of NA per matrix in an array
+###
+
+NAPerMatrix <- function(X1) {
+  D2 <- vector()
+  for (i in 1:1000){
+    D1 <- is.na(X1[,,i])
+    D2[i] <- sum(colSums(D1))
+  }
+  return(D2)
+}
+
+```
+
+
+Environmental Data
+```{r echo=FALSE, message=FALSE, results='hide'}
+#creating distances including semi natural sites
+Sites <- read.csv("Sites.csv")
+Sites$AgIndex <- Sites$AgIndex*10
+
+Spatial <- Sites %>% 
+  select(X, Y) %>% 
+  mutate(X_KM = (X - 680000)/1000, Y_KM = (Y - 720000)/1000) %>% 
+  select(X_KM, Y_KM)
+Spat.dist <- dist(Spatial)
+
+## Creating distance dataframe
+spatial <-  dist_to_frame(Spat.dist)
+names(spatial) <- c("row", "col", "dist")
+
+Index <- Sites %>% 
+  select(Impervious, AgIndex)
+Ind.dist <- dist(Index)
+
+### Gradient distance dataset
+gradient <-  dist_to_frame(Ind.dist)
+names(gradient) <- c("row", "col", "grad")
+
+# combining environmental datasets
+vars <- full_join(gradient, spatial)
+
+
+###Crearting environemantal and spatial distances including only agri and urban sites
+
+#creating spatial and environmental gradients
+Sites <- read.csv("Sites.csv")
+Sites$AgIndex <- Sites$AgIndex*10
+
+Land_sites <- Sites[-c(10,11,12),]
+
+#spatial distance
+Land_Spatial <- Land_sites %>% 
+  select(X, Y) %>% 
+  mutate(X_KM = (X - 680000)/1000, Y_KM = (Y - 720000)/1000) %>% 
+  select(X_KM, Y_KM)
+rownames(Land_Spatial)[10:18] <- c("13","14", "15", "16","17", "18", "19","20","21")
+land.spat.dist <- dist(Land_Spatial)
+
+## Creating distance dataframe
+Land.spatial <-  dist_to_frame(land.spat.dist)
+names(Land.spatial) <- c("row", "col", "dist")
+
+## creating urban and agri gradients
+#environmental distance
+Land.Index <- Land_sites %>% 
+  select(Impervious, AgIndex)
+Land.Ind.dist <- dist(Land.Index)
+
+### Gradient distance dataset
+Land.gradient <-  dist_to_frame(Land.Ind.dist)
+names(Land.gradient) <- c("row", "col", "grad")
+
+
+#creating urban environmental and spatial distances
+UrbanSpatial <- Sites[1:9,] %>% 
+  select(X, Y) %>% 
+  mutate(X_KM = (X - 680000)/1000, Y_KM = (Y - 720000)/1000) %>% 
+  select(X_KM, Y_KM)
+Urban.Spat.dist <- dist(UrbanSpatial)
+
+## Creating distance dataframe
+Urban.spatial <-  dist_to_frame(Urban.Spat.dist)
+names(Urban.spatial) <- c("row", "col", "dist")
+
+Urban.spatial$col <- as.numeric(as.character(Urban.spatial$col))
+Urban.spatial$row <- as.numeric(as.character(Urban.spatial$row))
+
+
+Urban.Index <- Sites[1:9,] %>% 
+  select(Impervious, AgIndex)
+Urban.Ind.dist <- dist(Urban.Index)
+
+### Gradient distance dataset
+urban.gradient <-  dist_to_frame(Urban.Ind.dist)
+names(urban.gradient) <- c("row", "col", "grad")
+
+urban.gradient$col <- as.numeric(urban.gradient$col)
+urban.gradient$row <- as.numeric(as.character(urban.gradient$row))
+
+# combining environmental datasets
+urban.vars <- full_join(urban.gradient, Urban.spatial)
+
+
+#creating agri environmental and spatial distances
+AgriSpatial <- Sites[13:21,] %>% 
+  select(X, Y) %>% 
+  mutate(X_KM = (X - 680000)/1000, Y_KM = (Y - 720000)/1000) %>% 
+  select(X_KM, Y_KM)
+row.names(AgriSpatial) <- c(13:21)
+Agri.Spat.dist <- dist(AgriSpatial)
+
+## Creating distance dataframe
+Agri.spatial <-  dist_to_frame(Agri.Spat.dist)
+names(Agri.spatial) <- c("row", "col", "dist")
+
+Agri.spatial$col <- as.numeric(as.character(Agri.spatial$col))
+Agri.spatial$row <- as.numeric(as.character(Agri.spatial$row))
+
+Agri.Index <- Sites[13:21,] %>% 
+  select(Impervious, AgIndex)
+Agri.Ind.dist <- dist(Agri.Index)
+
+### Gradient distance dataset
+agri.gradient <-  dist_to_frame(Agri.Ind.dist)
+names(agri.gradient) <- c("row", "col", "grad")
+
+agri.gradient$col <- as.numeric(as.character(agri.gradient$col))
+agri.gradient$row <- as.numeric(as.character(agri.gradient$row))
+
+# combining environmental datasets
+agri.vars <- full_join(agri.gradient, Agri.spatial)
+```
+
+Modifying Plant Names, adding in Plant Family and whether the species is Native or Introduced
+```{r}
+network$PlantSpecies <- as.factor(network$PlantSpecies)
+
+levels(as.factor(network$PlantSpecies))
+
+network$PlantSpecies <- as.character(network$PlantSpecies)
+
+network$Introduced.[network$PlantSpecies == "Achillea.millefolium"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Achillea.millefolium"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Aconitum.napellus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Aconitum.napellus"] <- "Ranunculaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Aegopodium.padagraria"] <- "Aegopodium.podagraria"
+network$Introduced.[network$PlantSpecies == "Aegopodium.podagraria"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Aconitum.napellus"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Agapanthus.sp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Aconitum.napellus"] <- "Amaryllidaceae"
+
+network$Introduced.[network$PlantSpecies == "Ajuga.reptans"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ajuga.reptans"] <- "Lamiaceae"
+
+network$Introduced.[network$PlantSpecies == "Alcea.rosea"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Alcea.rosea"] <- "Malvaceae"
+                   
+network$Introduced.[network$PlantSpecies == "Alliaria.petiolata"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Alliaria.petiolata"] <- "Brassicaceae" 
+
+network$Introduced.[network$PlantSpecies == "Allium.schoenoprasum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Allium.schoenoprasum"] <- "Amaryllidaceae"  
+                    
+network$Introduced.[network$PlantSpecies == "Allium.triquetrum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Allium.triquetrum"] <- "Amaryllidaceae"  
+
+network$Introduced.[network$PlantSpecies == "Alstroemeria.spp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Alstroemeria.spp"] <- "Alstroemeriaceae"  
+        
+network$Introduced.[network$PlantSpecies == "Anthriscus.sylvestris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Anthriscus.sylvestris"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Anthyllis.vulneraria"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Anthyllis.vulneraria"] <- "Fabaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Antirrhinum.agg"] <- "Antirrhinum.majus"
+network$Introduced.[network$PlantSpecies == "Antirrhinum.majus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Antirrhinum.majus"] <- "Plantaginaceae"
+
+network$Introduced.[network$PlantSpecies == "Astrantia.major"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Astrantia.major"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Aubrieta.deltoidea"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Aubrieta.deltoidea"] <- "Brassicaceae" 
+
+network$Introduced.[network$PlantSpecies == "Barbarea.vulgaris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Barbarea.vulgaris"] <- "Brassicaceae" 
+
+network$Introduced.[network$PlantSpecies == "Begonia.semperflorens"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Begonia.semperflorens"] <- "Begoniaceae" 
+                
+network$Introduced.[network$PlantSpecies == "Bellis.perennis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Bellis.perennis"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Berberis.darwinii"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Berberis.darwinii"] <- "Berberidaceae"
+
+network$Introduced.[network$PlantSpecies == "Berberis.sp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Berberis.sp"] <- "Berberidaceae" 
+                  
+network$Introduced.[network$PlantSpecies == "Blue.Flower"] <- NA
+network$Plant_Family[network$PlantSpecies == "Blue.Flower"] <- NA     
+
+network$Introduced.[network$PlantSpecies == "Brassica.rapa"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Brassica.rapa"] <- "Brassicaceae"  
+
+network$Introduced.[network$PlantSpecies == "Buddleja.davidii"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Buddleja.davidii"] <- "Scrophulariaceae"    
+
+network$Introduced.[network$PlantSpecies == "Buddleja.globosa"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Buddleja.globosa"] <- "Scrophulariaceae"
+
+network$Introduced.[network$PlantSpecies == "Bunias.orientalis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Bunias.orientalis"] <- "Brassicaceae"
+
+network$Introduced.[network$PlantSpecies == "Buxus.sempervirens"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Buxus.sempervirens"] <- "Buxaceae" 
+
+network$Introduced.[network$PlantSpecies == "Calibrachoa.parviflora"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Calibrachoa.parviflora"] <- "Solanaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Calysteiga.sepium"] <- "Calystegia.sepium"
+network$Introduced.[network$PlantSpecies == "Calystegia.sepium"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Calystegia.sepium"] <- "Solanaceae"
+
+network$Introduced.[network$PlantSpecies == "Campanula.portenschlagia"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Campanula.portenschlagia"] <- "Campanulaceae"
+
+network$Introduced.[network$PlantSpecies == "Campanula.rotundifolia"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Campanula.rotundifolia"] <- "Campanulaceae"
+
+network$Introduced.[network$PlantSpecies == "Capsella.bursa-pastoris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Capsella.bursa-pastoris"] <- "Brassicaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Cardamine.hirsutum"] <- "Cardamine.hirsuta"
+network$Introduced.[network$PlantSpecies == "Cardamine.hirsuta"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cardamine.hirsuta"] <- "Brassicaceae"
+
+network$Introduced.[network$PlantSpecies == "Cardamine.pratensis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cardamine.pratensis"] <- "Brassicaceae"
+
+network$Introduced.[network$PlantSpecies == "Ceanothus.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Ceanothus.agg"] <- "Rhamnaceae"
+
+network$Introduced.[network$PlantSpecies == "Centaurea.cyanus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Centaurea.cyanus"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Centaurea.nigra"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Centaurea.nigra"] <- "Asteraceae"
+           
+network$Introduced.[network$PlantSpecies == "Centranthus.ruber"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Centranthus.ruber"] <- "Caprifoliaceae"
+
+network$Introduced.[network$PlantSpecies == "Cerastium.fontanum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cerastium.fontanum"] <- "Caryophyllaceae"  
+
+network$Introduced.[network$PlantSpecies == "Cerastium.tomentosum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cerastium.tomentosum"] <- "Caryophyllaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Chamerion.anguistifolium"] <- "Chamaenerion.angustifolium"
+network$Introduced.[network$PlantSpecies == "Chamaenerion.angustifolium"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Chamaenerion.angustifolium"] <- "Onagraceae"
+                     
+network$Introduced.[network$PlantSpecies == "Chenopodium.album"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Chenopodium.album"] <- "Amaranthaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Chrysanthemum.segtum"] <- "Chrysanthemum.segetum"
+network$Introduced.[network$PlantSpecies == "Chrysanthemum.segetum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Chrysanthemum.segetum"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Circaea.lutetiana"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Circaea.lutetiana"] <- "Onagraceae"
+
+network$Introduced.[network$PlantSpecies == "Cirsium.arvense"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cirsium.arvense"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Cirsium.palustre"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cirsium.palustre"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Cirsium.vulgare"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cirsium.vulgare"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Cistus.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cistus.agg"] <- "Cistaceae"     
+
+network$Introduced.[network$PlantSpecies == "Conopodium.majus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Conopodium.majus"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Cornus.alba(Crimsam)"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cornus.alba(Crimsam)"] <- "Cornaceae" 
+                   
+network$Introduced.[network$PlantSpecies == "Cotoneaster.franchetii"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cotoneaster.franchetii"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Cotoneaster.frigidus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cotoneaster.frigidus"] <- "Rosaceae"   
+
+network$Introduced.[network$PlantSpecies == "Cotoneaster.hybridus.pendulus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cotoneaster.hybridus.pendulus"] <- "Rosaceae"   
+                    
+network$Introduced.[network$PlantSpecies == "Crataegus.monogyna"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Crataegus.monogyna"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Crepis.biennis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Crepis.biennis"] <- "Asteraceae"  
+        
+network$Introduced.[network$PlantSpecies == "Crepis.capillaris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Crepis.capillaris"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Crocosmia.xcrocosmiiflora"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Crocosmia.xcrocosmiiflora"] <- "Iridaceae"
+
+network$Introduced.[network$PlantSpecies == "Cytisus.scoparius"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cytisus.scoparius"] <- "Fabaceae" 
+
+network$Introduced.[network$PlantSpecies == "Daucus.carota"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Daucus.carota"] <- "Apiaceae" 
+
+network$Introduced.[network$PlantSpecies == "Dianthus.caryophyllus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Dianthus.caryophyllus"] <- "Caryophyllaceae" 
+
+network$Introduced.[network$PlantSpecies == "Digitalis.purpurea"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Digitalis.purpurea"] <- "Plantaginaceae" 
+
+network$Introduced.[network$PlantSpecies == "Dimorphotheca.ecklonis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Dimorphotheca.ecklonis"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Diplotaxis.tenuifolia"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Diplotaxis.tenuifolia"] <- "Brassicaceae"
+
+network$Introduced.[network$PlantSpecies == "Epilobium.hirsutum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Epilobium.hirsutum"] <- "Onagraceae"
+
+network$Introduced.[network$PlantSpecies == "Epilobium.montanum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Epilobium.montanum"] <- "Onagraceae" 
+
+network$Introduced.[network$PlantSpecies == "Epilobium.parviflorum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Epilobium.parviflorum"] <- "Onagraceae" 
+
+network$Introduced.[network$PlantSpecies == "Erica.spp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Erica.spp"] <- "Ericaceae"
+
+network$Introduced.[network$PlantSpecies == "Erigeron.glaucus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Erigeron.glaucus"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Erysimum.spp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Erysimum.spp"] <- "Brassicaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Escallonia.macrantha"] <- "Escallonia.rubra.var.macrantha"
+network$Introduced.[network$PlantSpecies == "Escallonia.rubra.var.macrantha"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Escallonia.rubra.var.macrantha"] <- "Escalloniaceae" 
+
+network$Introduced.[network$PlantSpecies == "Fallopia.baldschuanica"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Fallopia.baldschuanica"] <- "Polygonaceae"
+
+network$Introduced.[network$PlantSpecies == "Ficaria.verna"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ficaria.verna"] <- "Ranunculaceae"
+
+network$Introduced.[network$PlantSpecies == "Filipendula.ulmaria"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Filipendula.ulmaria"] <- "Rosaceae" 
+               
+network$Introduced.[network$PlantSpecies == "Fuchsia.(cult)"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Fuchsia.(cult)"] <- "Onagraceae"
+
+network$Introduced.[network$PlantSpecies == "Fuchsia.magellanica"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Fuchsia.magellanica"] <- "Onagraceae"
+
+network$PlantSpecies[network$PlantSpecies == "Fumaria.officianalis"] <- "Fumaria.officinalis"
+network$Introduced.[network$PlantSpecies == "Fumaria.officinalis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Fumaria.officinalis"] <- "Papaveraceae"
+
+network$Introduced.[network$PlantSpecies == "Geranium.(cult)"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Geranium.(cult)"] <- "Geraniaceae"
+
+network$Introduced.[network$PlantSpecies == "Geranium.pratense"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Geranium.pratense"] <- "Geraniaceae" 
+
+network$Introduced.[network$PlantSpecies == "Geranium.pyrenaicum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Geranium.pyrenaicum"] <- "Geraniaceae"
+
+network$Introduced.[network$PlantSpecies == "Geranium.robertianum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Geranium.robertianum"] <- "Geraniaceae"
+
+network$Introduced.[network$PlantSpecies == "Geranium.versicolor"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Geranium.versicolor"] <- "Geraniaceae"  
+                      
+network$Introduced.[network$PlantSpecies == "Grass"] <- NA
+network$Plant_Family[network$PlantSpecies == "Grass"] <- NA                   
+               
+network$Introduced.[network$PlantSpecies == "Hebe.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Hebe.agg"] <- "Plantaginaceae" 
+
+network$Introduced.[network$PlantSpecies == "Helichrysum.italicum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Helichrysum.italicum"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Heracleum.sphondylium"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Heracleum.sphondylium"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Heuchera.cult"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Heuchera.cult"] <- "Saxifragaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Hycainthoides.non-scripta"] <- "Hyacinthoides.non-scripta"
+network$Introduced.[network$PlantSpecies == "Hyacinthoides.non-scripta"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Hyacinthoides.non-scripta"] <- "Asparagaceae" 
+
+network$Introduced.[network$PlantSpecies == "Hydrangea.cult"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Hydrangea.cult"] <- "Hydrangeaceae"
+         
+network$Introduced.[network$PlantSpecies == "Hypericum.androsaemum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Hypericum.androsaemum"] <- "Hypericaceae"
+
+network$Introduced.[network$PlantSpecies == "Hypericum.perforatum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Hypericum.perforatum"] <- "Hypericaceae"
+
+network$Introduced.[network$PlantSpecies == "Hypochaeris.radicata"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Hypochaeris.radicata"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Iris.pseudacorus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Iris.pseudacorus"] <- "Iridaceae"
+
+network$Introduced.[network$PlantSpecies == "Knautia.arvensis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Knautia.arvensis"] <- "Caprifoliaceae"
+
+network$Introduced.[network$PlantSpecies == "Laburnum.xwatereri"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Laburnum.xwatereri"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Lamium.purpureum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Lamium.purpureum"] <- "Lamiaceae"
+
+network$Introduced.[network$PlantSpecies == "Lapsana.communis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Lapsana.communis"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Lathyrus.odoratus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Lathyrus.odoratus"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Lathyrus.pratensis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Lathyrus.pratensis"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Lavandula.angustifolia"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Lavandula.angustifolia"] <- "Lamiaceae"
+
+network$Introduced.[network$PlantSpecies == "Leontodon.autumnalis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Leontodon.autumnalis"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Leontodon.hispidus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Leontodon.hispidus"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Leontodon.saxatilis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Leontodon.saxatilis"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Leucanthemum.vulgare"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Leucanthemum.vulgare"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Leucanthemum.xsuperbum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Leucanthemum.xsuperbum"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Ligustrum.vulgare"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ligustrum.vulgare"] <- "Oleaceae"
+
+network$Introduced.[network$PlantSpecies == "Linaria.purpurea"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Linaria.purpurea"] <- "Plantaginaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Linum.usitatissimum"] <- "Linum.bienne"
+network$Introduced.[network$PlantSpecies == "Linum.bienne"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Linum.bienne"] <- "Linaceae"
+
+network$Introduced.[network$PlantSpecies == "Lonicera.nitida"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Lonicera.nitida"] <- "Caprifoliaceae"
+
+network$Introduced.[network$PlantSpecies == "Lonicera.periclymenum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Lonicera.periclymenum"] <- "Caprifoliaceae"
+
+network$Introduced.[network$PlantSpecies == "Lotus.corniculatus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Lotus.corniculatus"] <- "Fabaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Malus.prunifolia"] <- "Malus.sylvestris"
+network$Introduced.[network$PlantSpecies == "Malus.sylvestris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Malus.sylvestris"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Malus.pumila"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Malus.pumila"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Malva.arborea"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Malva.arborea"] <- "Malvaceae"
+
+network$Introduced.[network$PlantSpecies == "Malva.sylvestris"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Malva.sylvestris"] <- "Malvaceae"
+            
+network$Introduced.[network$PlantSpecies == "Mentha.×piperita"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Mentha.×piperita"] <- "Lamiaceae"    
+
+network$Introduced.[network$PlantSpecies == "Nepeta.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Nepeta.agg"] <- "Lamiaceae"
+
+network$Introduced.[network$PlantSpecies == "Odontites.vernus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Odontites.vernus"] <- "Orobanchaceae"
+
+network$Introduced.[network$PlantSpecies == "Oxalis.debilis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Oxalis.debilis"] <- "Oxalidaceae"
+
+network$Introduced.[network$PlantSpecies == "Papaver.somniferum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Papaver.somniferum"] <- "Papaveraceae"
+
+network$Introduced.[network$PlantSpecies == "Pelargonium.cult"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Pelargonium.cult"] <- "Geraniaceae"
+
+network$Introduced.[network$PlantSpecies == "Penstemon.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Penstemon.agg"] <- "Plantaginaceae"  
+                   
+network$Introduced.[network$PlantSpecies == "Pentaglottis.sempervirens"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Pentaglottis.sempervirens"] <- "Boraginaceae"  
+
+network$Introduced.[network$PlantSpecies == "Persicaria.maculosa"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Persicaria.maculosa"] <- "Polygonaceae"
+
+network$Introduced.[network$PlantSpecies == "Petunia.xatkinsiana"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Petunia.xatkinsiana"] <- "Solanaceae"
+
+network$Introduced.[network$PlantSpecies == "Pink Aster"] <- NA
+network$Plant_Family[network$PlantSpecies == "Pink Aster"] <- "Asteraceae"  
+
+network$Introduced.[network$PlantSpecies == "Pink.Flower"] <- NA
+network$Plant_Family[network$PlantSpecies == "Pink.Flower"] <- NA  
+
+network$Introduced.[network$PlantSpecies == "Plantago.lanceolata"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Plantago.lanceolata"] <- "Plantaginaceae"  
+                           
+network$Introduced.[network$PlantSpecies == "Potentilla.erecta"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Potentilla.erecta"] <- "Rosaceae"  
+
+network$Introduced.[network$PlantSpecies == "Potentilla.reptans"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Potentilla.reptans"] <- "Rosaceae"  
+                            
+network$Introduced.[network$PlantSpecies == "Primula.veris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Primula.veris"] <- "Primulaceae" 
+
+network$Introduced.[network$PlantSpecies == "Prunus.spinosa"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Prunus.spinosa"] <- "Rosaceae" 
+
+network$Introduced.[network$PlantSpecies == "Purple.Flower.Hemp"] <- NA
+network$Plant_Family[network$PlantSpecies == "Purple.Flower.Hemp"] <- NA
+
+network$Introduced.[network$PlantSpecies == "Purple.Tongue.Flower"] <- NA
+network$Plant_Family[network$PlantSpecies == "Purple.Tongue.Flower"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "Pyracantha.spp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Pyracantha.spp"] <- "Rosaceae"                
+
+network$Introduced.[network$PlantSpecies == "Ranunculus.acris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ranunculus.acris"] <- "Ranunculaceae" 
+
+network$Introduced.[network$PlantSpecies == "Ranunculus.repens"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ranunculus.repens"] <- "Ranunculaceae"
+
+network$Introduced.[network$PlantSpecies == "RED FLOWER"] <- NA
+network$Plant_Family[network$PlantSpecies == "RED FLOWER"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "Reseda.luteola"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Reseda.luteola"] <- "Resedaceae"
+
+network$Introduced.[network$PlantSpecies == "Rhinanthus.minor"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Rhinanthus.minor"] <- "Orobanchaceae"
+
+network$Introduced.[network$PlantSpecies == "Rhododendron.davidii"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Rhododendron.davidii"] <- "Ericaceae"
+
+network$Introduced.[network$PlantSpecies == "Rhus.typhina.sp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Rhus.typhina.sp"] <- "Anacardiaceae"
+
+network$Introduced.[network$PlantSpecies == "Ribes.sanguineum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Ribes.sanguineum"] <- "Grossulariaceae"
+
+network$Introduced.[network$PlantSpecies == "Rorippa.nasturtium-aquaticum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Rorippa.nasturtium-aquaticum"] <- "	Brassicaceae"
+
+network$Introduced.[network$PlantSpecies == "Rosa.canina"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Rosa.canina"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Rosa.cult"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Rosa.cult"] <- "Rosaceae"                         
+
+network$Introduced.[network$PlantSpecies == "Rosa.rubignosa"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Rosa.rubignosa"] <- "Rosaceae"       
+
+network$Introduced.[network$PlantSpecies == "Rosa.cult"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Rosa.cult"] <- "Rosaceae"  
+
+network$Introduced.[network$PlantSpecies == "Rosmarinus.officinalis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Rosmarinus.officinalis"] <- "Lamiaceae" 
+
+network$Introduced.[network$PlantSpecies == "Rubus.fruticosus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Rubus.fruticosus"] <- "Rosaceae" 
+
+network$Introduced.[network$PlantSpecies == "Sallix.spp"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Sallix.spp"] <- "Salicaceae" 
+
+network$Introduced.[network$PlantSpecies == "Salvia.microphylla"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Salvia.microphylla"] <- "Lamiaceae"
+
+network$Introduced.[network$PlantSpecies == "Salvia.officinalis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Salvia.officinalis"] <- "Lamiaceae" 
+
+network$Introduced.[network$PlantSpecies == "Scabiosa.columbaria"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Scabiosa.columbaria"] <- "Caprifoliaceae" 
+
+network$Introduced.[network$PlantSpecies == "Scrophularia.auriculata"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Scrophularia.auriculata"] <- "Scrophulariaceae" 
+
+network$Introduced.[network$PlantSpecies == "Sedum.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Sedum.agg"] <- "Crassulaceae" 
+
+network$PlantSpecies[network$PlantSpecies == "Senecio.greyii"] <- "Brachyglottis.greyi"
+network$Introduced.[network$PlantSpecies == "Brachyglottis.greyi"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Brachyglottis.greyi"] <- "Asteraceae" 
+               
+network$Introduced.[network$PlantSpecies == "Senecio.jacobaea"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Senecio.jacobaea"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Silene.dioica"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Silene.dioica"] <- "Caryophyllaceae" 
+
+network$Introduced.[network$PlantSpecies == "Silene.dioica"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Silene.dioica"] <- "Caryophyllaceae" 
+
+network$Introduced.[network$PlantSpecies == "Sinapsis.arvensis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Sinapsis.arvensis"] <- "Brassicaceae" 
+
+network$Introduced.[network$PlantSpecies == "Smyrnium.olusatrum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Smyrnium.olusatrum"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Solanum.tuberosum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Solanum.tuberosum"] <- "Solanaceae" 
+                                    
+network$Introduced.[network$PlantSpecies == "Sonchus.arvensis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Sonchus.arvensis"] <- "Asteraceae" 
+                                    
+network$Introduced.[network$PlantSpecies == "Sonchus.asper"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Sonchus.asper"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Spikey white and pink flowered bush"] <- NA
+network$Plant_Family[network$PlantSpecies == "Spikey white and pink flowered bush"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "Spiraea.japonica"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Spiraea.japonica"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Spiraea.xarguta"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Spiraea.xarguta"] <- "Rosaceae" 
+
+network$Introduced.[network$PlantSpecies == "Spiraea.xbillardii"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Spiraea.xbillardii"] <- "Rosaceae" 
+
+network$Introduced.[network$PlantSpecies == "Stachys.byzantina"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Stachys.byzantina"] <- "Lamiaceae" 
+
+network$Introduced.[network$PlantSpecies == "Stellaria.graminea"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Stellaria.graminea"] <- "Caryophyllaceae" 
+
+network$Introduced.[network$PlantSpecies == "Stellaria.media"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Stellaria.media"] <- "Caryophyllaceae"                      
+                   
+network$Introduced.[network$PlantSpecies == "Symphoricarpos.albus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Symphoricarpos.albus"] <- "Caprifoliaceae"                      
+
+network$Introduced.[network$PlantSpecies == "Symphytum.×uplandicum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Symphytum.×uplandicum"] <- "Boraginaceae"                      
+     
+network$Introduced.[network$PlantSpecies == "Tagetes.patula"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Tagetes.patula"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Tanacetum.parthenium"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Tanacetum.parthenium"] <- "Asteraceae" 
+               
+network$Introduced.[network$PlantSpecies == "Tanacetum.vulgare"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Tanacetum.vulgare"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Taraxacum.agg"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Taraxacum.agg"] <- "Asteraceae" 
+
+network$PlantSpecies[network$PlantSpecies == "Tillia.xeuropaea"] <- "Tilia.xeuropaea"
+network$Introduced.[network$PlantSpecies == "Tilia.xeuropaea"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Tilia.xeuropaea"] <- "Malvaceae"
+
+network$Introduced.[network$PlantSpecies == "Trachelospermum.jasminoides"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Trachelospermum.jasminoides"] <- "Apocynaceae"
+               
+network$Introduced.[network$PlantSpecies == "Trifolium.pratense"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Trifolium.pratense"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Trifolium.repens"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Trifolium.repens"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Ulex.europaeus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ulex.europaeus"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Verbena.bonariensis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Verbena.bonariensis"] <- "Verbenaceae"
+
+network$Introduced.[network$PlantSpecies == "Veronica.chamaedrys"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Veronica.chamaedrys"] <- "Plantaginaceae"
+
+network$Introduced.[network$PlantSpecies == "Veronica.persica"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Veronica.persica"] <- "Plantaginaceae"
+         
+network$Introduced.[network$PlantSpecies == "Viburnum.tinus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Viburnum.tinus"] <- "Adoxaceae"                   
+
+network$Introduced.[network$PlantSpecies == "Vicia.sativa"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Vicia.sativa"] <- "Fabaceae"             
+
+network$Introduced.[network$PlantSpecies == "Vicia.sepium"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Vicia.sepium"] <- "Fabaceae"     
+
+network$Introduced.[network$PlantSpecies == "Viola.odorata"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Viola.odorata"] <- "Violaceae" 
+
+network$Introduced.[network$PlantSpecies == "Weigela.kosteriana.variegata"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Weigela.kosteriana.variegata"] <- "Caprifoliaceae" 
+
+network$Introduced.[network$PlantSpecies == "White flower grey leaves"] <- NA
+network$Plant_Family[network$PlantSpecies == "White flower grey leaves"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "White.Flower"] <- NA
+network$Plant_Family[network$PlantSpecies == "White.Flower"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "White thorn like flower bus no spikes"] <- NA
+network$Plant_Family[network$PlantSpecies == "White thorn like flower bus no spikes"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "White.Tree.Flower"] <- NA
+network$Plant_Family[network$PlantSpecies == "White.Tree.Flower"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "Yellow.Aster"] <- NA
+network$Plant_Family[network$PlantSpecies == "Yellow.Aster"] <- NA 
+
+
+levels(as.factor(network$Introduced.))
+levels(as.factor(network$Plant_Family))
+network$PlantSpecies <- as.factor(network$PlantSpecies)
+
+```
+
+
+# Community and Network Dissimilarity
+
+Using presence absence dissimilarity measures as no abundance based dissimilarity measures exist for interaction networks yet. 
+
+ <center>
+![Turnover Nestedness](Turnover-Nestedness.PNG)
+</center>
+
+## Plant Community Null Model
+Can calculate alpha diversity corrected beta diversities using null models
+```{r echo=FALSE, message=FALSE, results='hide'}
+#Presence absence data
+plant_community[plant_community > 0] <- 1
+
+# in vegan package, the bray index is identical to the sorensen index when binary is true and equal to to bray curtis index when binary equals false
+
+nm <- vegan::nullmodel(plant_community, "r1")
+sm <- simulate(nm, nsim=1000)
+
+Null_plant <- array(0L, dim = c(210,3,1000))
+for (e in 1:1000){
+Null_plant[,,e] <- as.matrix(beta.pair_mod(sm[,,e], index.family = "sorensen")[,3:5])
+}
+
+null_plant_mean <- matrix(0L,210, 3)
+null_plant_sd <- matrix(0L,210, 3)
+for (i in 1:210){
+ for(e in 1:3){
+   null_plant_mean[i,e] <- mean(na.omit(Null_plant[i,e,1:1000]))
+   null_plant_sd[i,e] <- sd(na.omit(Null_plant[i,e,1:1000]))
+  }
+}
+
+plant_emp <- beta.pair_mod(plant_community,index.family = "sorensen")[,3:5]
+plant_z_scores <- (plant_emp - null_plant_mean)/null_plant_sd
+```
+
+
+
+### Analysing Plant community Empirical Beta Diversity and Z-score Measures
+```{r echo=FALSE, message=FALSE, fig.show = 'hold', out.width = '50%', warning=FALSE}
+#Mantel Tests
+#empirical measures
+plant.Ind.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(plant_emp[1:3]), c("statistic", "signif")))
+plant.Spat.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(plant_emp[1:3]), c("statistic", "signif")))
+
+nams <- with(vars, unique(c(as.character(col), as.character(row))))
+for (i in 1:3){
+dist <- structure(plant_emp[,i],
+                           Size = length(nams),
+                           Labels = nams,
+                           Diag = FALSE,
+                           Upper = FALSE,
+                           method = "user",
+                           class = "dist")
+
+Ind.mant <- mantel(dist, Ind.dist)
+plant.Ind.Sig[i,] <- c(Ind.mant$statistic, Ind.mant$signif)
+
+Spat.mant <- mantel(dist, Spat.dist)
+plant.Spat.Sig[i,] <- c(Spat.mant$statistic, Spat.mant$signif)
+}
+
+kable(cbind(plant.Spat.Sig,plant.Ind.Sig)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c("Empirical" = 1, "spatial" = 2, "gradient" = 2))
+
+
+#z scores
+plant.Ind.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(plant_z_scores[1:3]), c("statistic", "signif")))
+
+plant.Spat.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(plant_z_scores[1:3]), c("statistic", "signif")))
+
+plant_z_scores$SNE[plant_z_scores$SNE == "NaN"] <- 0
+
+nams <- with(vars, unique(c(as.character(col), as.character(row))))
+for (i in 1:3){
+dist <- structure(plant_z_scores[,i],
+                           Size = length(nams),
+                           Labels = nams,
+                           Diag = FALSE,
+                           Upper = FALSE,
+                           method = "user",
+                           class = "dist")
+
+Ind.mant <- mantel(dist, Ind.dist)
+plant.Ind.Sig[i,] <- c(Ind.mant$statistic, Ind.mant$signif)
+
+Spat.mant <- mantel(dist, Spat.dist)
+plant.Spat.Sig[i,] <- c(Spat.mant$statistic, Spat.mant$signif)
+}
+
+kable(cbind(plant.Spat.Sig,plant.Ind.Sig)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c("Z-scores" = 1, "spatial" = 2, "gradient" = 2))
+
+#Plots
+#empirical measures
+
+
+#plotting empirical data, not the z score data
+
+## Creating distance dataframe
+spatial <-  dist_to_frame(Spat.dist)
+names(spatial) <- c("row", "col", "dist")
+
+### Gradient distance dataset
+gradient <-  dist_to_frame(Ind.dist)
+names(gradient) <- c("row", "col", "grad")
+
+# combining environmental datasets
+vars <- full_join(gradient, spatial)
+
+plant_emp$row <- vars$row
+plant_emp$col <- vars$col
+
+# joining to plant data
+Plant_beta = full_join(vars, plant_emp) %>% 
+  pivot_longer(c(SIM, SNE, SOR), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+plant.g1 <- ggplot(Plant_beta, aes(dist, Beta_value, col = Beta_Type)) +
+  geom_point(size = 3) +
+        geom_smooth(alpha = 0.2,
+              method="loess", se=T) +
+       labs( y="Beta Diversity", 
+            x="Distance", 
+            title="Plamt Beta Diveristy and Spatial Distance") +
+       theme_classic()
+
+plant.g2 <- ggplot(Plant_beta, aes(grad, Beta_value, col = Beta_Type)) +
+  geom_point(size = 3) +
+        geom_smooth( alpha = 0.2,
+              method="loess", se=T) +
+       labs(y="Beta Diversity", 
+            x="Gradient", 
+            title="Plant Beta Diveristy and Gradient Distance") +
+       theme_classic()
+
+plant.g1
+plant.g2
+
+
+# Z-score measures
+
+plant_z_scores$row <- vars$row
+plant_z_scores$col <- vars$col
+
+# joining to plant data
+Plant_beta = full_join(vars, plant_z_scores) %>% 
+  pivot_longer(c(SIM, SNE, SOR), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+Plant_beta$alpha[Plant_beta$Beta_value < -1.96] <- 0.6
+Plant_beta$alpha[Plant_beta$Beta_value >= -1.96 & Plant_beta$Beta_value <= +1.96] <- 0.2
+Plant_beta$alpha[Plant_beta$Beta_value > +1.96] <- 0.6
+
+class(Plant_beta$Beta_Type)
+Plant_beta$Beta_Type <- as.factor(Plant_beta$Beta_Type)
+levels(Plant_beta$Beta_Type)
+
+plant.g3 <- ggplot(Plant_beta, aes(dist, Beta_value)) +
+  geom_point(aes(col = Beta_Type), alpha = Plant_beta$alpha, size = 3) +
+        geom_smooth(aes(col = Beta_Type), alpha = 0.2,
+              method="loess", se=T) +
+       labs(y="Z-score", 
+            x="Distance", 
+            title="Plant Beta Diveristy and Spatial Distance") +
+  geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()
+
+plant.g4 <- ggplot(Plant_beta, aes(grad, Beta_value)) +
+  geom_point(aes(col = Beta_Type), alpha = Plant_beta$alpha, size = 3) +
+        geom_smooth(aes(col = Beta_Type), alpha = 0.2,
+              method="loess", se=T) +
+       labs(y="Z-score", 
+            x="Gradient", 
+            title="Plant Beta Diveristy and Gradient Distance") +
+    geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+      geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()
+
+plant.g3
+plant.g4
+
+#nearly all difference is due to turnover rather than nestedness so just plotting sorensen measure
+
+Plant_beta <- Plant_beta[Plant_beta$Beta_Type == "SOR",]
+
+plant.g5 <- ggplot(Plant_beta, aes(dist, Beta_value)) +
+  geom_point(alpha = Plant_beta$alpha, size = 3) +
+        geom_smooth(alpha = 0.2,
+              method="loess", se=T) +
+       labs(y="Z-score", 
+            x="Spatial Distance in KM"
+            #, title="Plant Beta Diveristy and Spatial Distance"
+            ) +
+    ylim(-5,2.2) +
+  geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()
+
+plant.g6 <- ggplot(Plant_beta, aes(grad, Beta_value)) +
+  geom_point( alpha = Plant_beta$alpha, size = 3) +
+        geom_smooth( alpha = 0.2,
+              method="loess", se=T) +
+       labs(y="Z-score", 
+            x="Environmental Dissimilarity"
+            #, title="Plant Beta Diveristy and Gradient Distance"
+            ) +
+    ylim(-5,2.2) +
+    geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+      geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()
+
+plant.g5
+plant.g6
+
+
+```
+
+
+
+
+
+## Pollinator Community Null Model
+Can calculate alpha diversity corrected beta diversities using null models
+```{r echo=FALSE, message=FALSE, results='hide'}
+#Presence absence data
+pollinator_community[pollinator_community > 0] <- 1
+
+# in vegan package, the bray index is identical to the sorensen index when binary is true and equal to to bray curtis index when binary equals false
+
+nm <- vegan::nullmodel(pollinator_community, "r1")
+sm <- simulate(nm, nsim=1000)
+
+Null_pol <- array(0L, dim = c(210,3,1000))
+for (e in 1:1000){
+Null_pol[,,e] <- as.matrix(beta.pair_mod(sm[,,e], index.family = "sorensen")[,3:5])
+}
+
+null_pol_mean <- matrix(0L,210, 3)
+null_pol_sd <- matrix(0L,210, 3)
+for (i in 1:210){
+ for(e in 1:3){
+   null_pol_mean[i,e] <- mean(na.omit(Null_pol[i,e,1:1000]))
+   null_pol_sd[i,e] <- sd(na.omit(Null_pol[i,e,1:1000]))
+  }
+}
+
+pol_emp <- beta.pair_mod(pollinator_community,index.family = "sorensen")[,3:5]
+pol_z_scores <- (pol_emp - null_pol_mean)/null_pol_sd
+```
+
+
+### Analysing Pollinator community Z-scores
+```{r echo=FALSE, message=FALSE, fig.show = 'hold', out.width = '50%', warning=FALSE}
+#Mantel Tests
+#Empirical Measures
+
+pol.Ind.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(pol_emp[1:3]), c("statistic", "signif")))
+pol.Spat.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(pol_emp[1:3]), c("statistic", "signif")))
+
+pol_z_scores$SNE[pol_z_scores$SNE == "NaN"] <- 0
+
+nams <- with(vars, unique(c(as.character(col), as.character(row))))
+for (i in 1:3){
+dist <- structure(pol_emp[,i],
+                           Size = length(nams),
+                           Labels = nams,
+                           Diag = FALSE,
+                           Upper = FALSE,
+                           method = "user",
+                           class = "dist")
+
+Ind.mant <- mantel(dist, Ind.dist)
+pol.Ind.Sig[i,] <- c(Ind.mant$statistic, Ind.mant$signif)
+
+Spat.mant <- mantel(dist, Spat.dist)
+pol.Spat.Sig[i,] <- c(Spat.mant$statistic, Spat.mant$signif)
+}
+
+kable(cbind(pol.Spat.Sig,pol.Ind.Sig)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c("Empirical" = 1, "spatial" = 2, "gradient" = 2))
+
+
+#Z-scores
+
+pol.Ind.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(pol_z_scores[1:3]), c("statistic", "signif")))
+pol.Spat.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(pol_z_scores[1:3]), c("statistic", "signif")))
+
+pol_z_scores$SNE[pol_z_scores$SNE == "NaN"] <- 0
+
+nams <- with(vars, unique(c(as.character(col), as.character(row))))
+for (i in 1:3){
+dist <- structure(pol_z_scores[,i],
+                           Size = length(nams),
+                           Labels = nams,
+                           Diag = FALSE,
+                           Upper = FALSE,
+                           method = "user",
+                           class = "dist")
+
+Ind.mant <- mantel(dist, Ind.dist)
+pol.Ind.Sig[i,] <- c(Ind.mant$statistic, Ind.mant$signif)
+
+Spat.mant <- mantel(dist, Spat.dist)
+pol.Spat.Sig[i,] <- c(Spat.mant$statistic, Spat.mant$signif)
+}
+
+kable(cbind(pol.Spat.Sig,pol.Ind.Sig)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c("Z-scores" = 1, "spatial" = 2, "gradient" = 2))
+
+
+
+
+# Plots
+# Empirical Measures
+
+pol_emp$row <- vars$row
+pol_emp$col <- vars$col
+
+# joining to plant data
+Pol_beta = full_join(vars, pol_emp) %>% 
+  pivot_longer(c(SIM, SNE, SOR), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+Pol_beta$Beta_Type <- as.factor(Pol_beta$Beta_Type)
+
+pol.g1 <- ggplot(Pol_beta, aes(dist, Beta_value, col = Beta_Type)) +
+  geom_point(size = 3) +
+        geom_smooth(aes(col = Beta_Type), alpha = 0.5,
+              method="loess", se=T) +
+       labs(y="Beta Diversity", 
+            x="Distance", 
+            title="Pollinator Beta Diveristy and Spatial Distance") +
+       theme_classic()
+
+
+pol.g2 <- ggplot(Pol_beta, aes(grad, Beta_value, col = Beta_Type)) +
+  geom_point(size = 3) +
+        geom_smooth(alpha = 0.5,
+              method="loess", se=T) +
+       labs(y="Beta Diversity", 
+            x="Gradient Dissimilarity", 
+            title="Pollinator Beta Diveristy and Gradient Distance") +
+       theme_classic()
+
+pol.g1
+pol.g2
+
+# Z-Scores
+
+pol_z_scores$row <- vars$row
+pol_z_scores$col <- vars$col
+
+# joining to plant data
+Pol_beta = full_join(vars, pol_z_scores) %>% 
+  pivot_longer(c(SIM, SNE, SOR), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+Pol_beta$alpha[Pol_beta$Beta_value < -1.96] <- 0.6
+Pol_beta$alpha[Pol_beta$Beta_value >= -1.96 & Pol_beta$Beta_value <= +1.96] <- 0.2
+Pol_beta$alpha[Pol_beta$Beta_value > +1.96] <- 0.6
+
+
+Pol_beta$Beta_Type <- as.factor(Pol_beta$Beta_Type)
+levels(Pol_beta$Beta_Type)
+
+
+
+pol.g3 <- ggplot(Pol_beta, aes(dist, Beta_value)) +
+  geom_point(aes(col = Beta_Type), alpha = Pol_beta$alpha, size = 3) +
+        geom_smooth(aes(col = Beta_Type), alpha = 0.5,
+              method="loess", se=T) +
+       labs( y="Z-score", 
+            x="Distance", 
+            title="Pollinator Beta Diveristy and Spatial Distance") +
+  geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()
+
+
+pol.g4 <- ggplot(Pol_beta, aes(grad, Beta_value)) +
+  geom_point(aes(col = Beta_Type), alpha = Pol_beta$alpha, size = 3) +
+        geom_smooth(aes(col = Beta_Type), alpha = 0.5,
+              method="loess", se=T) +
+       labs(y="Z-score", 
+            x="Gradient Dissimilarity", 
+            title="Pollinator Beta Diveristy and Gradient Distance") +
+  geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()
+
+pol.g3
+pol.g4
+
+
+#nearly all difference is due to turnover rather than nestedness so just plotting sorensen measure
+
+Pol_beta <- Pol_beta[Pol_beta$Beta_Type == "SOR",]
+
+pol.g5 <- ggplot(Pol_beta, aes(dist, Beta_value)) +
+  geom_point( alpha = Pol_beta$alpha, size = 3) +
+        geom_smooth(alpha = 0.5,
+              method="loess", se=T) +
+       labs( y="Z-score", 
+            x="Spatial Distance in KM"
+            #, title="Pollinator Beta Diveristy and Spatial Distance"
+            ) +
+    ylim(-5,2.2) +
+  geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()
+
+
+pol.g6 <- ggplot(Pol_beta, aes(grad, Beta_value)) +
+  geom_point(alpha = Pol_beta$alpha, size = 3) +
+        geom_smooth(alpha = 0.5,
+              method="loess", se=T) +
+       labs(y="Z-score", 
+            x="Environmental Dissimilarity"
+            #, title="Pollinator Beta Diveristy and Gradient Distance"
+            ) +
+    ylim(-5,2.2) +
+  geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()
+
+pol.g5
+pol.g6
+
+```
+
+
+## Interaction Network Null Model
+Network Null Model, All sites
+```{r echo=FALSE, message=FALSE, results='hide'}
+#generating the meta network. Converting to probablity matrix, dividing the matrix by the largest frequency of interactions
+#library(remotes)
+#install_git("https://plmlab.math.cnrs.fr/econetproject/econetwork")
+
+#meta_net <- matrix(data = NA, nrow = length(colnames(pollinator_community)), ncol = length(colnames(plant_community)), dimnames #= list(colnames(pollinator_community), colnames(plant_community)))
+
+#for (i in seq_along(rownames(meta_net))){
+#  for (j in seq_along(colnames(meta_net))){
+#meta_net[i,j] <- sum(na.omit(network$VisitationFrequency[network$FlowerVisitorSpecies == rownames(meta_net)[i] & #network$PlantSpecies == colnames(meta_net)[j]]))
+#  }
+#}
+#meta_net <- meta_net/max(meta_net)
+
+
+#Full_Null <- suppressWarnings(null_network(n = 1000, Number.of.Sites = 21,
+#             plant = plant_community, pol = pollinator_community,
+#             meta = meta_net, net_list = netlist))
+
+
+#Nulls <- list()
+#for (e in 1:1000){
+#  Nulls[[e]] <- list()
+#for (i in 1:21){
+#Nulls[[e]][[i]] <- Full_Null[[i]][[e]]
+#}
+#}
+
+#Full_Null_networks <- list()
+#for (e in 1:1000){
+#Full_Null_networks[[e]] <- list()
+#Full_Null_networks[[e]] <- suppressMessages(prepare_networks(Nulls[[e]], directed = FALSE))
+#}
+
+#Null_Networks_Abund <- array(0L, dim = c(210,1,1000))
+# for (e in 1:1000){
+#Null_Networks_Abund[,,e] <- dist_to_frame(econetwork::disPairwise(Full_Null_networks[[e]], eta = 1, type = "L"))[,3]
+#}
+
+
+#saveRDS(Null_Networks_Abund, file = "Null_Networks_Abund.Rda")
+
+Null_Networks_Abund <- readRDS(file = "Null_Networks_Abund.Rda")
+
+#630 NA, not more than six per dataframe. I'm going to omit them.
+#sum(NAPerMatrix(Null_Networks_Abund))
+
+
+null_mean <- matrix(0L,210, 1)
+null_sd <- matrix(0L,210, 1)
+for (i in 1:210){
+ for(e in 1:1){
+   null_mean[i,e] <- mean(na.omit(Null_Networks_Abund[i,e,1:1000]))
+   null_sd[i,e] <- sd(na.omit(Null_Networks_Abund[i,e,1:1000]))
+  }
+}
+
+beta_emp <- dist_to_frame(econetwork::disPairwise(networks, eta = 1, type = "L"))[,3]
+
+z_score <- (beta_emp-null_mean)/null_sd
+```
+
+
+### Analysing Z-scores
+```{r echo=FALSE, message=FALSE, fig.show = 'hold', out.width = '50%', warning=FALSE}
+#mantel
+#z scores
+Network.Ind.Sig <- matrix(0L, nrow = 1, ncol = 2, dimnames = list("z_score", c("statistic", "signif")))
+Network.Spat.Sig <- matrix(0L, nrow = 1, ncol = 2, dimnames = list("z_score", c("statistic", "signif")))
+for (i in 1:1){
+dist <- structure(z_score[,i],
+                           Size = 21,
+                           Labels = c(1:21),
+                           Diag = FALSE,
+                           Upper = FALSE,
+                           method = "user",
+                           class = "dist")
+
+Ind.mant <- mantel(dist, Ind.dist)
+Network.Ind.Sig[i,] <- c(Ind.mant$statistic, Ind.mant$signif)
+
+Spat.mant <- mantel(dist, Spat.dist)
+Network.Spat.Sig[i,] <- c(Spat.mant$statistic, Spat.mant$signif)
+}
+
+kable(cbind(Network.Spat.Sig,Network.Ind.Sig)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c("Z-scores" = 1, "spatial" = 2, "gradient" = 2))
+
+#empirical measures
+Network.Ind.Sig <- matrix(0L, nrow = 1, ncol = 2, dimnames = list("beta_emp", c("statistic", "signif")))
+Network.Spat.Sig <- matrix(0L, nrow = 1, ncol = 2, dimnames = list("beta_emp", c("statistic", "signif")))
+
+dist <- structure(beta_emp,
+                           Size = 21,
+                           Labels = c(1:21),
+                           Diag = FALSE,
+                           Upper = FALSE,
+                           method = "user",
+                           class = "dist")
+
+Ind.mant <- mantel(dist, Ind.dist)
+Network.Ind.Sig[1,] <- c(Ind.mant$statistic, Ind.mant$signif)
+
+Spat.mant <- mantel(dist, Spat.dist)
+Network.Spat.Sig[1,] <- c(Spat.mant$statistic, Spat.mant$signif)
+
+
+kable(cbind(Network.Spat.Sig,Network.Ind.Sig)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c("Empirical" = 1, "spatial" = 2, "gradient" = 2))
+
+
+#Plots
+
+z_score <- as_tibble(z_score)
+z_score$row <- vars$row
+z_score$col <- vars$col
+
+
+
+# joining to environmental data
+Network_beta = full_join(vars, z_score) 
+
+
+Network_beta$alpha[Network_beta$V1 < -1.96] <- 0.6
+Network_beta$alpha[Network_beta$V1 >= -1.96 & Network_beta$V1 <= +1.96] <- 0.2
+Network_beta$alpha[Network_beta$V1 > +1.96] <- 0.6
+
+
+g1 <- ggplot(Network_beta, aes(dist, V1)) +
+  geom_point(alpha = Network_beta$alpha) +
+        geom_smooth(
+              method="loess", se=T) +
+       labs(subtitle="z-scores", 
+            y="Beta Diversity", 
+            x="Distance", 
+            title="Network Beta Diveristy and Spatial Distance") +
+  geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()
+
+g2 <- ggplot(Network_beta, aes(grad, V1)) +
+  geom_point(alpha = Network_beta$alpha) +
+        geom_smooth(
+              method="loess", se=T) +
+       labs(subtitle="z-scores", 
+            y="Beta Diversity", 
+            x="Gradient Dissimilarity", 
+            title="Network Beta Diveristy and Gradient Distance") +
+    geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+      geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()
+
+g1
+g2
+
+
+
+##creating plots for paper
+
+networkg1 <-ggplot(Network_beta, aes(dist, V1)) +
+  geom_point(alpha = Network_beta$alpha, size = 3) +
+        geom_smooth(
+              method="loess", se=T) +
+    labs(y="z-scores", 
+       x="Spatial Distance in KM") +
+  ylim(-5,2.2) +
+    geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()
+
+networkg2 <- ggplot(Network_beta, aes(grad, V1)) +
+  geom_point(alpha = Network_beta$alpha, size = 3) +
+        geom_smooth(
+              method="loess", se=T) +
+  labs(y="z-scores", 
+       x="Environmental Dissimilarity") +
+  ylim(-5,2.2) +
+    geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()
+
+networkg1
+networkg2
+```
+
+Combining into one plot
+```{r}
+library(cowplot)
+  
+(comp_plot <- plot_grid(plant.g5, pol.g5, networkg1, plant.g6, pol.g6, networkg2, labels = c("a", "b", "c", "d", "e", "f")))
+ggsave("Community_Network_PA_Dissimilarity.svg", comp_plot, device = "svg", width = 30, height = 20, units = "cm")
+
+```
+
+
+
+## Bee and Hoverfly Community Analysis
+
+```{r echo=FALSE, message=FALSE, results='hide'}
+pol_names <- names(pollinator_community)
+
+pol_names <- as.data.frame(pol_names)
+pol_names$type <- c("bee", "bee", "bee", "bee", "bee",
+                    "bee","bee","hover","bee", "bee",
+                    "bee", "bee", "bee", "bee", "bee",
+                    "bee", "hover", "hover", "hover", "beetle",
+                    "butterfly", "hover", "diptera", "hover", "hover",
+                    "hover","hover","hover","hover","hover",
+                    "hover","hover","hover","hover","butterfly",
+                    "bee", "bee", "hover","hover","hover",
+                    "bee", "butterfly", "butterfly", "bee", "bee",
+                    "bee", "bee", "butterfly", "hover", "butterfly",
+                    "butterfly", "bee", "bee", "hover","hover",
+                    "hover","hover","hover","hover","bee",
+                    "butterfly", "bee","wasp", "hover","hover",
+                    "hover","hover","hover","hover","hover",
+                    "butterfly", "hover","hover","hover","hover",
+                    "butterfly", "butterfly", "hover","hover","hover",
+                    "hover","sawfly", "wasp", "hover","hover")
+
+pol_names$pol_names <- as.character(pol_names$pol_names)
+
+bees <- pol_names$pol_names[pol_names$type == "bee"]
+
+hovers <- pol_names$pol_names[pol_names$type == "hover"]
+```
+
+### Bee community
+```{r echo=FALSE, message=FALSE, fig.show = 'hold', out.width = '50%'}
+bee_community <- pollinator_community[,which(colnames(pollinator_community) %in% bees)]
+
+nm <- vegan::nullmodel(bee_community, "r1")
+sm <- simulate(nm, nsim=1000)
+
+Null_pol <- array(0L, dim = c(210,3,1000))
+for (e in 1:1000){
+Null_pol[,,e] <- as.matrix(beta.pair_mod(sm[,,e], index.family = "sorensen")[,3:5])
+}
+
+null_pol_mean <- matrix(0L,210, 3)
+null_pol_sd <- matrix(0L,210, 3)
+for (i in 1:210){
+ for(e in 1:3){
+   null_pol_mean[i,e] <- mean(na.omit(Null_pol[i,e,1:1000]))
+   null_pol_sd[i,e] <- sd(na.omit(Null_pol[i,e,1:1000]))
+  }
+}
+
+bee_emp <- beta.pair_mod(bee_community,index.family = "sorensen")[,3:5]
+bee_z_scores <- (bee_emp - null_pol_mean)/null_pol_sd
+
+
+## mantel tests
+#z-scores
+bee.Ind.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(bee_z_scores), c("statistic", "signif")))
+bee.Spat.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(bee_z_scores), c("statistic", "signif")))
+
+bee_z_scores$SNE[bee_z_scores$SNE == "NaN"] <- 0
+
+nams <- with(vars, unique(c(as.character(col), as.character(row))))
+for(i in 1:3){
+dist <- structure(bee_z_scores[,i],
+                           Size = length(nams),
+                           Labels = nams,
+                           Diag = FALSE,
+                           Upper = FALSE,
+                           method = "user",
+                           class = "dist")
+
+Ind.mant <- mantel(dist, Ind.dist)
+bee.Ind.Sig[i,] <- c(Ind.mant$statistic, Ind.mant$signif)
+
+Spat.mant <- mantel(dist, Spat.dist)
+bee.Spat.Sig[i,] <- c(Spat.mant$statistic, Spat.mant$signif)
+}
+
+kable(cbind(bee.Spat.Sig,bee.Ind.Sig)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c("z-scores" = 1, "spatial" = 2, "gradient" = 2))
+
+#empirical
+bee.Ind.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(bee_emp), c("statistic", "signif")))
+bee.Spat.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(bee_emp), c("statistic", "signif")))
+
+nams <- with(vars, unique(c(as.character(col), as.character(row))))
+for(i in 1:3){
+dist <- structure(bee_emp[,i],
+                           Size = length(nams),
+                           Labels = nams,
+                           Diag = FALSE,
+                           Upper = FALSE,
+                           method = "user",
+                           class = "dist")
+
+Ind.mant <- mantel(dist, Ind.dist)
+bee.Ind.Sig[i,] <- c(Ind.mant$statistic, Ind.mant$signif)
+
+Spat.mant <- mantel(dist, Spat.dist)
+bee.Spat.Sig[i,] <- c(Spat.mant$statistic, Spat.mant$signif)
+}
+
+kable(cbind(bee.Spat.Sig,bee.Ind.Sig)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c("empirical" = 1, "spatial" = 2, "gradient" = 2))
+
+
+
+bee_emp
+bee_emp$row <- vars$row
+bee_emp$col <- vars$col
+
+Bee_emp = full_join(vars, bee_emp) %>% 
+  pivot_longer(c(SIM, SNE, SOR), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+
+#Bee_emp <- Bee_emp %>% filter(Beta_Type == "SOR")
+
+g1 <- ggplot(Bee_emp, aes(dist, Beta_value, col = Beta_Type)) +
+  geom_point() +
+        geom_smooth(
+              method="lm", se=T) +
+       labs(subtitle="", 
+            y="Beta Diversity", 
+            x="Distance", 
+            title="Bee Network Beta Diveristy and Spatial Distance") +
+       theme_classic()
+
+g2 <- ggplot(Bee_emp, aes(grad, Beta_value, col = Beta_Type)) +
+  geom_point() +
+        geom_smooth(
+              method="lm", se=T) +
+       labs(subtitle="", 
+            y="Beta Diversity", 
+            x="Gradient Dissimilarity", 
+            title="Bee Network Beta Diveristy and Gradient Distance") +
+  
+       theme_classic()
+
+g1
+g2
+
+
+bee_z_scores$row <- vars$row
+bee_z_scores$col <- vars$col
+
+Bee_z_scores = full_join(vars, bee_z_scores) %>% 
+  pivot_longer(c(SIM, SNE, SOR), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+Bee_z_scores$alpha[Bee_z_scores$Beta_value < -1.96] <- 0.6
+Bee_z_scores$alpha[Bee_z_scores$Beta_value >= -1.96 & Bee_z_scores$Beta_value <= +1.96] <- 0.2
+Bee_z_scores$alpha[Bee_z_scores$Beta_value > +1.96] <- 0.6
+
+Bee_z_scores <- Bee_z_scores %>% filter(Beta_Type == "SOR")
+
+
+
+Bee_Z_g1 <- ggplot(Bee_z_scores, aes(dist, Beta_value)) +
+  geom_point(aes(alpha = alpha, size = 3)) +
+        geom_smooth(
+              method="loess", se=T) +
+       labs(y="Beta Diversity", 
+            x="Distance in KM", 
+            title="Bee Community") +
+      geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()+ 
+  theme(legend.position="None")
+
+Bee_Z_g2 <- ggplot(Bee_z_scores, aes(grad, Beta_value)) +
+  geom_point(aes(alpha = alpha, size = 3)) +
+        geom_smooth(
+              method="loess", se=T) +
+       labs(y="Beta Diversity", 
+            x="Gradient Dissimilarity", 
+            title="Bee Community") +
+      geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()+ 
+  theme(legend.position="None")
+
+Bee_Z_g1
+Bee_Z_g2
+```
+
+### Hoverfly community
+```{r echo=FALSE, message=FALSE, fig.show = 'hold', out.width = '50%'}
+hover_community <- pollinator_community[,which(colnames(pollinator_community) %in% hovers)]
+
+#null community
+nm <- vegan::nullmodel(hover_community, "r1")
+sm <- simulate(nm, nsim=1000)
+
+Null_pol <- array(0L, dim = c(210,3,1000))
+for (e in 1:1000){
+Null_pol[,,e] <- as.matrix(beta.pair_mod(sm[,,e], index.family = "sorensen")[,3:5])
+}
+
+null_pol_mean <- matrix(0L,210, 3)
+null_pol_sd <- matrix(0L,210, 3)
+for (i in 1:210){
+ for(e in 1:3){
+   null_pol_mean[i,e] <- mean(na.omit(Null_pol[i,e,1:1000]))
+   null_pol_sd[i,e] <- sd(na.omit(Null_pol[i,e,1:1000]))
+  }
+}
+
+hover_emp <- beta.pair_mod(hover_community,index.family = "sorensen")[,3:5]
+hover_z_scores <- (hover_emp - null_pol_mean)/null_pol_sd
+
+
+## mantel tests
+#empirical
+hover.Ind.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(hover_emp), c("statistic", "signif")))
+hover.Spat.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(hover_emp), c("statistic", "signif")))
+
+nams <- with(vars, unique(c(as.character(col), as.character(row))))
+for(i in 1:3){
+dist <- structure(hover_emp[,i],
+                           Size = length(nams),
+                           Labels = nams,
+                           Diag = FALSE,
+                           Upper = FALSE,
+                           method = "user",
+                           class = "dist")
+
+Ind.mant <- mantel(dist, Ind.dist)
+hover.Ind.Sig[i,] <- c(Ind.mant$statistic, Ind.mant$signif)
+
+Spat.mant <- mantel(dist, Spat.dist)
+hover.Spat.Sig[i,] <- c(Spat.mant$statistic, Spat.mant$signif)
+}
+
+kable(cbind(hover.Spat.Sig,hover.Ind.Sig)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c("empirical" = 1, "spatial" = 2, "gradient" = 2))
+
+
+#z-scores
+hover.Ind.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(hover_z_scores), c("statistic", "signif")))
+hover.Spat.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(hover_z_scores), c("statistic", "signif")))
+
+hover_z_scores$SNE[hover_z_scores$SNE == "NaN"] <- 0
+hover_z_scores$SNE[hover_z_scores$SNE == "Inf"] <- 0
+
+nams <- with(vars, unique(c(as.character(col), as.character(row))))
+for(i in 1:3){
+dist <- structure(hover_z_scores[,i],
+                           Size = length(nams),
+                           Labels = nams,
+                           Diag = FALSE,
+                           Upper = FALSE,
+                           method = "user",
+                           class = "dist")
+
+Ind.mant <- mantel(dist, Ind.dist)
+hover.Ind.Sig[i,] <- c(Ind.mant$statistic, Ind.mant$signif)
+
+Spat.mant <- mantel(dist, Spat.dist)
+hover.Spat.Sig[i,] <- c(Spat.mant$statistic, Spat.mant$signif)
+}
+
+kable(cbind(hover.Spat.Sig,hover.Ind.Sig)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c("z-scores" = 1, "spatial" = 2, "gradient" = 2))
+
+
+## Ploting
+
+hover_emp$row <- vars$row
+hover_emp$col <- vars$col
+
+Hover_emp = full_join(vars, hover_emp) %>% 
+  pivot_longer(c(SIM, SNE, SOR), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+#Bee_emp <- Bee_emp %>% filter(Beta_Type == "SOR")
+
+g1 <- ggplot(Hover_emp, aes(dist, Beta_value, col = Beta_Type)) +
+  geom_point() +
+        geom_smooth(
+              method="lm", se=T) +
+       labs(subtitle="", 
+            y="Beta Diversity", 
+            x="Distance", 
+            title="Hover Network Beta Diveristy and Spatial Distance") +
+       theme_classic()
+
+g2 <- ggplot(Hover_emp, aes(grad, Beta_value, col = Beta_Type)) +
+  geom_point() +
+        geom_smooth(
+              method="lm", se=T) +
+       labs(subtitle="", 
+            y="Beta Diversity", 
+            x="Gradient Dissimilarity", 
+            title="Hover Network Beta Diveristy and Gradient Distance") +
+       theme_classic()
+
+g1
+g2
+
+
+hover_z_scores$row <- vars$row
+hover_z_scores$col <- vars$col
+
+Hover_z_scores = full_join(vars, hover_z_scores) %>% 
+  pivot_longer(c(SIM, SNE, SOR), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+Hover_z_scores$alpha[Hover_z_scores$Beta_value < -1.96] <- 0.6
+Hover_z_scores$alpha[Hover_z_scores$Beta_value >= -1.96 & Hover_z_scores$Beta_value <= +1.96] <- 0.2
+Hover_z_scores$alpha[Hover_z_scores$Beta_value > +1.96] <- 0.6
+
+Hover_z_scores <- Hover_z_scores %>% filter(Beta_Type == "SOR")
+
+
+Hover_Z_g1 <- ggplot(Hover_z_scores, aes(dist, Beta_value)) +
+  geom_point(aes(alpha = alpha, size = 3)) +
+        geom_smooth(
+              method="lm", se=T) +
+       labs(subtitle="", 
+            y="Z-Score", 
+            x="Distance in KM", 
+            title="Hoverfly Community") +
+      geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()+ 
+  theme(legend.position="None")
+
+Hover_Z_g2 <- ggplot(Hover_z_scores, aes(grad, Beta_value)) +
+  geom_point(aes(alpha = alpha, size = 3)) +
+        geom_smooth(
+              method="lm", se=T) +
+       labs(subtitle="", 
+            y="Z-Score", 
+            x="Gradient Dissimilarity", 
+            title="Hoverfly Community") +
+      geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()+ 
+  theme(legend.position="None")
+
+Hover_Z_g1
+Hover_Z_g2
+```
+
+
+### Combined Bee Hoverfly Plot
+
+```{r}
+(comp_plot <- plot_grid(Bee_Z_g1, Bee_Z_g2, Hover_Z_g1, Hover_Z_g2, labels = c("a", "b", "c", "d")))
+ggsave("Bee_Hover_Community_PA_Dissimilarity.svg", comp_plot, device = "svg", width = 30, height = 20, units = "cm")
+
+```
+
+
+## Native and Non-Native Plant Community Analysis
+
+```{r echo=FALSE, message=FALSE, fig.show = 'hold', out.width = '50%'}
+plant_names <- names(plant_community)
+plant_names <- as.data.frame(plant_names)
+
+plant_names$Plant_Origin <- NA
+
+
+for (i in seq_along(plant_names$plant_names)){
+  plant_names$Plant_Origin[i] <- first(na.omit(network$Introduced.[network$PlantSpecies == plant_names$plant_names[i]]))
+}
+
+native <- na.omit(plant_names$plant_names[plant_names$Plant_Origin == "N"])
+introduced <- na.omit(plant_names$plant_names[plant_names$Plant_Origin == "I"])
+```
+
+
+### Native Community
+
+```{r echo=FALSE, message=FALSE, fig.show = 'hold', out.width = '50%'}
+
+native_community <- plant_community[, which(colnames(plant_community) %in% native)]
+
+#null community
+nm <- vegan::nullmodel(native_community, "r1")
+sm <- simulate(nm, nsim=1000)
+
+Null_plant <- array(0L, dim = c(210,3,1000))
+for (e in 1:1000){
+Null_plant[,,e] <- suppressMessages(as.matrix(beta.pair_mod(sm[,,e], index.family = "sorensen")[,3:5]))
+}
+
+null_plant_mean <- matrix(0L,210, 3)
+null_plant_sd <- matrix(0L,210, 3)
+for (i in 1:210){
+ for(e in 1:3){
+   null_plant_mean[i,e] <- mean(na.omit(Null_plant[i,e,1:1000]))
+   null_plant_sd[i,e] <- sd(na.omit(Null_plant[i,e,1:1000]))
+  }
+}
+
+native_emp <- beta.pair_mod(native_community,index.family = "sorensen")[,3:5]
+native_z_scores <- (native_emp - null_plant_mean)/null_plant_sd
+
+
+## mantel tests
+#empirical
+native.Ind.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(native_emp), c("statistic", "signif")))
+native.Spat.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(native_emp), c("statistic", "signif")))
+
+nams <- with(vars, unique(c(as.character(col), as.character(row))))
+for(i in 1:3){
+dist <- structure(native_emp[,i],
+                           Size = length(nams),
+                           Labels = nams,
+                           Diag = FALSE,
+                           Upper = FALSE,
+                           method = "user",
+                           class = "dist")
+
+Ind.mant <- mantel(dist, Ind.dist)
+native.Ind.Sig[i,] <- c(Ind.mant$statistic, Ind.mant$signif)
+
+Spat.mant <- mantel(dist, Spat.dist)
+native.Spat.Sig[i,] <- c(Spat.mant$statistic, Spat.mant$signif)
+}
+
+kable(cbind(native.Spat.Sig,native.Ind.Sig)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c("empirical" = 1, "spatial" = 2, "gradient" = 2))
+
+
+
+#z-scores
+hover.Ind.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(native_z_scores), c("statistic", "signif")))
+hover.Spat.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(native_z_scores), c("statistic", "signif")))
+
+native_z_scores$SNE[native_z_scores$SNE == "NaN"] <- 0
+native_z_scores$SNE[native_z_scores$SNE == "Inf"] <- 0
+
+native_z_scores$SOR[native_z_scores$SOR == "NaN"] <- 0
+native_z_scores$SOR[native_z_scores$SOR == "Inf"] <- 0
+
+native_z_scores$SIM[native_z_scores$SIM == "NaN"] <- 0
+native_z_scores$SIM[native_z_scores$SIM == "Inf"] <- 0
+
+nams <- with(vars, unique(c(as.character(col), as.character(row))))
+for(i in 1:3){
+dist <- structure(native_z_scores[,i],
+                           Size = length(nams),
+                           Labels = nams,
+                           Diag = FALSE,
+                           Upper = FALSE,
+                           method = "user",
+                           class = "dist")
+
+Ind.mant <- mantel(dist, Ind.dist)
+hover.Ind.Sig[i,] <- c(Ind.mant$statistic, Ind.mant$signif)
+
+Spat.mant <- mantel(dist, Spat.dist)
+hover.Spat.Sig[i,] <- c(Spat.mant$statistic, Spat.mant$signif)
+}
+
+kable(cbind(hover.Spat.Sig,hover.Ind.Sig)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c("z-scores" = 1, "spatial" = 2, "gradient" = 2))
+
+
+## Ploting
+
+
+
+native_emp$row <- vars$row
+native_emp$col <- vars$col
+
+Native_emp = full_join(vars, native_emp) %>% 
+  pivot_longer(c(SIM, SNE, SOR), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+Native_emp$Beta_value[Native_emp$Beta_value == 0] <- NA
+
+Native_emp <- Native_emp %>% filter(Beta_Type == "SOR")
+
+g1 <- ggplot(Native_emp, aes(dist, Beta_value, col = Beta_Type)) +
+  geom_point() +
+        geom_smooth(
+              method="lm", se=T) +
+       labs(subtitle="", 
+            y="Beta Diversity", 
+            x="Distance", 
+            title="Native Plant Diveristy and Spatial Distance") +
+       theme_classic()
+
+g2 <- ggplot(Native_emp, aes(grad, Beta_value, col = Beta_Type)) +
+  geom_point() +
+        geom_smooth(
+              method="lm", se=T) +
+       labs(subtitle="", 
+            y="Beta Diversity", 
+            x="Gradient Dissimilarity", 
+            title="Native Plant Diveristy and Gradient Distance") +
+       theme_classic()
+
+g1
+g2
+
+
+native_z_scores$row <- vars$row
+native_z_scores$col <- vars$col
+
+Native_z_scores = full_join(vars, native_z_scores) %>% 
+  pivot_longer(c(SIM, SNE, SOR), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+Native_z_scores$alpha[Native_z_scores$Beta_value < -1.96] <- 0.6
+Native_z_scores$alpha[Native_z_scores$Beta_value >= -1.96 & Native_z_scores$Beta_value <= +1.96] <- 0.2
+Native_z_scores$alpha[Native_z_scores$Beta_value > +1.96] <- 0.6
+
+Native_z_scores <- Native_z_scores %>% filter(Beta_Type == "SOR")
+
+
+Native_Z_g1 <- ggplot(Native_z_scores, aes(dist, Beta_value)) +
+  geom_point(aes(alpha = alpha, size = 3)) +
+        geom_smooth(
+              method="loess", se=T) +
+       labs(y="Z-score", 
+            x="Distance", 
+            title="Native Plant Diveristy") +
+      geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()+ 
+  theme(legend.position = "None")
+
+
+Native_Z_g2 <- ggplot(Native_z_scores, aes(grad, Beta_value)) +
+  geom_point(aes(alpha = alpha, size = 3)) +
+        geom_smooth(
+              method="loess", se=T) +
+       labs(y="Z-score", 
+            x="Gradient Dissimilarity", 
+            title="Native Plant Diveristy") +
+      geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()+ 
+  theme(legend.position="None")
+
+Native_Z_g1
+Native_Z_g2
+```
+
+### Non-Native Community
+
+```{r}
+
+introduced_community <- plant_community[, which(colnames(plant_community) %in% introduced)]
+
+#null community
+nm <- vegan::nullmodel(introduced_community, "r1")
+sm <- simulate(nm, nsim=1000)
+
+Null_pol <- array(0L, dim = c(210,3,1000))
+for (e in 1:1000){
+Null_pol[,,e] <- suppressMessages(as.matrix(beta.pair_mod(sm[,,e], index.family = "sorensen")[,3:5]))
+}
+
+null_pol_mean <- matrix(0L,210, 3)
+null_pol_sd <- matrix(0L,210, 3)
+for (i in 1:210){
+ for(e in 1:3){
+   null_pol_mean[i,e] <- mean(na.omit(Null_pol[i,e,1:1000]))
+   null_pol_sd[i,e] <- sd(na.omit(Null_pol[i,e,1:1000]))
+  }
+}
+
+introduced_emp <- beta.pair_mod(introduced_community,index.family = "sorensen")[,3:5]
+introduced_z_scores <- (introduced_emp - null_pol_mean)/null_pol_sd
+
+
+## mantel tests
+#empirical
+introduced.Ind.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(introduced_emp), c("statistic", "signif")))
+introduced.Spat.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(introduced_emp), c("statistic", "signif")))
+
+introduced_emp$SNE[introduced_emp$SNE == "NaN"] <- 0
+introduced_emp$SOR[introduced_emp$SOR == "NaN"] <- 0
+introduced_emp$SIM[introduced_emp$SIM == "NaN"] <- 0
+
+nams <- with(vars, unique(c(as.character(col), as.character(row))))
+for(i in 1:3){
+dist <- structure(introduced_emp[,i],
+                           Size = length(nams),
+                           Labels = nams,
+                           Diag = FALSE,
+                           Upper = FALSE,
+                           method = "user",
+                           class = "dist")
+
+Ind.mant <- mantel(dist, Ind.dist)
+introduced.Ind.Sig[i,] <- c(Ind.mant$statistic, Ind.mant$signif)
+
+Spat.mant <- mantel(dist, Spat.dist)
+introduced.Spat.Sig[i,] <- c(Spat.mant$statistic, Spat.mant$signif)
+}
+
+kable(cbind(introduced.Spat.Sig,introduced.Ind.Sig)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c("empirical" = 1, "spatial" = 2, "gradient" = 2))
+
+
+
+#z-scores
+hover.Ind.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(introduced_z_scores), c("statistic", "signif")))
+hover.Spat.Sig <- matrix(0L, nrow = 3, ncol = 2, dimnames = list(colnames(introduced_z_scores), c("statistic", "signif")))
+
+introduced_z_scores$SNE[introduced_z_scores$SNE == "NaN"] <- 0
+introduced_z_scores$SNE[introduced_z_scores$SNE == "Inf"] <- 0
+
+introduced_z_scores$SOR[introduced_z_scores$SOR == "NaN"] <- 0
+introduced_z_scores$SOR[introduced_z_scores$SOR == "Inf"] <- 0
+
+introduced_z_scores$SIM[introduced_z_scores$SIM == "NaN"] <- 0
+introduced_z_scores$SIM[introduced_z_scores$SIM == "Inf"] <- 0
+
+nams <- with(vars, unique(c(as.character(col), as.character(row))))
+for(i in 1:3){
+dist <- structure(introduced_z_scores[,i],
+                           Size = length(nams),
+                           Labels = nams,
+                           Diag = FALSE,
+                           Upper = FALSE,
+                           method = "user",
+                           class = "dist")
+
+Ind.mant <- mantel(dist, Ind.dist)
+hover.Ind.Sig[i,] <- c(Ind.mant$statistic, Ind.mant$signif)
+
+Spat.mant <- mantel(dist, Spat.dist)
+hover.Spat.Sig[i,] <- c(Spat.mant$statistic, Spat.mant$signif)
+}
+
+kable(cbind(hover.Spat.Sig,hover.Ind.Sig)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c("z-scores" = 1, "spatial" = 2, "gradient" = 2))
+
+
+## Ploting
+
+
+
+introduced_emp$row <- vars$row
+introduced_emp$col <- vars$col
+
+Introduced_emp = full_join(vars, introduced_emp) %>% 
+  pivot_longer(c(SIM, SNE, SOR), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+Introduced_emp$Beta_value[Introduced_emp$Beta_value == 0] <- NA
+
+Introduced_emp <- Introduced_emp %>% filter(Beta_Type == "SOR")
+
+g1 <- ggplot(Introduced_emp, aes(dist, Beta_value, col = Beta_Type)) +
+  geom_point() +
+        geom_smooth(
+              method="lm", se=T) +
+       labs(y="Beta Diversity", 
+            x="Distance", 
+            title="introduced Plant Diveristy and Spatial Distance") +
+       theme_classic()
+
+g2 <- ggplot(Introduced_emp, aes(grad, Beta_value, col = Beta_Type)) +
+  geom_point() +
+        geom_smooth(
+              method="lm", se=T) +
+       labs(y="Beta Diversity", 
+            x="Gradient Dissimilarity", 
+            title="introduced Plant Diveristy and Gradient Distance") +
+       theme_classic()
+
+g1
+g2
+
+
+introduced_z_scores$row <- vars$row
+introduced_z_scores$col <- vars$col
+
+Introduced_z_scores = full_join(vars, introduced_z_scores) %>% 
+  pivot_longer(c(SIM, SNE, SOR), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+Introduced_z_scores$alpha[Introduced_z_scores$Beta_value < -1.96] <- 0.6
+Introduced_z_scores$alpha[Introduced_z_scores$Beta_value >= -1.96 & Introduced_z_scores$Beta_value <= +1.96] <- 0.2
+Introduced_z_scores$alpha[Introduced_z_scores$Beta_value > +1.96] <- 0.6
+
+Introduced_z_scores <- Introduced_z_scores %>% filter(Beta_Type == "SOR")
+
+
+Introduced_Z_g1 <- ggplot(Introduced_z_scores, aes(dist, Beta_value)) +
+  geom_point(aes(alpha = alpha, size = 3)) +
+        geom_smooth(
+              method="loess", se=T) +
+       labs(y="Z-score", 
+            x="Distance", 
+            title="Introduced Plant Diveristy") +
+      geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()+ 
+  theme(legend.position = "None")
+
+
+Introduced_Z_g2 <- ggplot(Introduced_z_scores, aes(grad, Beta_value)) +
+  geom_point(aes(alpha = alpha, size = 3)) +
+        geom_smooth(
+              method="loess", se=T) +
+       labs(y="Z-score", 
+            x="Gradient Dissimilarity", 
+            title="Introduced Plant Diveristy") +
+      geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()+ 
+  theme(legend.position="None")
+
+Introduced_Z_g1
+Introduced_Z_g2
+```
+
+
+### Combined Native Non-Native Plot
+
+```{r}
+(comp_plot <- plot_grid(Native_Z_g1, Native_Z_g2, Introduced_Z_g1, Introduced_Z_g2, labels = c("a", "b", "c", "d")))
+ggsave("Native_Introduced_Community_PA_Dissimilarity.svg", comp_plot, device = "svg", width = 30, height = 20, units = "cm")
+
+```
+
+
+
+
+
+
+# Drivers of Interaction Turnover
+
+## Interaction Network Null Model
+Network Null Model, All sites
+```{r echo=FALSE, message=FALSE, results='hide'}
+#generating the meta network. Converting to probablity matrix, dividing the matrix by the largest frequency of interactions
+meta_net <- matrix(data = NA, nrow = length(colnames(plant_community)), ncol = length(colnames(pollinator_community)), dimnames = list(colnames(plant_community), colnames(pollinator_community)))
+
+for (i in seq_along(colnames(meta_net))){
+  for (j in seq_along(rownames(meta_net))){
+meta_net[j,i] <- sum(na.omit(network$VisitationFrequency[network$FlowerVisitorSpecies == colnames(meta_net)[i] & network$PlantSpecies == rownames(meta_net)[j]]))
+  }
+}
+meta_net <- meta_net/max(meta_net)
+
+
+Full_Null <- suppressWarnings(null_network(n = 1000, Number.of.Sites = 21,
+             plant = plant_community, pol = pollinator_community,
+             meta = meta_net, net_list = netlist))
+
+
+Nulls <- list()
+for (e in 1:1000){
+  Nulls[[e]] <- list()
+for (i in 1:21){
+Nulls[[e]][[i]] <- Full_Null[[i]][[e]]
+}
+}
+
+Full_Null_networks <- list()
+for (e in 1:1000){
+Full_Null_networks[[e]] <- list()
+Full_Null_networks[[e]] <- suppressMessages(prepare_networks(Nulls[[e]], directed = FALSE))
+}
+
+
+#betatest <- array(0L, dim = c(210,7,1000))
+#for (e in 1:1000){
+#betatest[,,e] <- as.matrix(network_betadiversity_mod(Full_Null_networks[[e]], netlist, complete = FALSE, bf = B01)[,1:7])
+#}
+
+#saveRDS(betatest, file = "betatest.Rda")
+betatest <- readRDS(file = "betatest.Rda")
+
+#630 NA, not more than six per dataframe. I'm going to omit them.
+sum(NAPerMatrix(betatest))
+
+
+null_mean <- matrix(0L,210, 7)
+null_sd <- matrix(0L,210, 7)
+for (i in 1:210){
+ for(e in 1:7){
+   null_mean[i,e] <- mean(na.omit(betatest[i,e,1:10]))
+   null_sd[i,e] <- sd(na.omit(betatest[i,e,1:10]))
+  }
+}
+
+beta_emp <- network_betadiversity_mod(networks, netlist, complete = FALSE, bf = B01)[,1:7]
+z_score <- (beta_emp-null_mean)/null_sd
+```
+
+
+### Analysing Z-scores
+```{r echo=FALSE, message=FALSE, fig.show = 'hold', out.width = '50%', warning=FALSE}
+#mantel
+#empirical measures
+
+Network.Ind.Sig <- matrix(0L, nrow = 7, ncol = 2, dimnames = list(colnames(beta_emp[1:7]), c("statistic", "signif")))
+Network.Spat.Sig <- matrix(0L, nrow = 7, ncol = 2, dimnames = list(colnames(beta_emp[1:7]), c("statistic", "signif")))
+
+for (i in 1:7){
+dist <- structure(beta_emp[,i],
+                           Size = 21,
+                           Labels = c(1:21),
+                           Diag = FALSE,
+                           Upper = FALSE,
+                           method = "user",
+                           class = "dist")
+
+Ind.mant <- ecodist::mantel(dist ~ Ind.dist)
+Network.Ind.Sig[i,] <- c(Ind.mant[1], Ind.mant[4])
+
+Spat.mant <- ecodist::mantel(dist ~ Spat.dist)
+Network.Spat.Sig[i,] <- c(Spat.mant[1], Spat.mant[4])
+}
+
+kable(cbind(Network.Spat.Sig,Network.Ind.Sig)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c("Empirical" = 1, "spatial" = 2, "gradient" = 2))
+
+
+# Z-Score measures
+
+Network.Ind.Sig <- matrix(0L, nrow = 7, ncol = 2, dimnames = list(colnames(z_score[1:7]), c("statistic", "signif")))
+Network.Spat.Sig <- matrix(0L, nrow = 7, ncol = 2, dimnames = list(colnames(z_score[1:7]), c("statistic", "signif")))
+
+for (i in 1:7){
+dist <- structure(z_score[,i],
+                           Size = 21,
+                           Labels = c(1:21),
+                           Diag = FALSE,
+                           Upper = FALSE,
+                           method = "user",
+                           class = "dist")
+
+Ind.mant <- ecodist::mantel(dist ~ Ind.dist)
+Network.Ind.Sig[i,] <- c(Ind.mant[1], Ind.mant[4])
+
+Spat.mant <- ecodist::mantel(dist ~ Spat.dist)
+Network.Spat.Sig[i,] <- c(Spat.mant[1], Spat.mant[4])
+}
+
+kable(cbind(Network.Spat.Sig,Network.Ind.Sig)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c("Z-Score" = 1, "spatial" = 2, "gradient" = 2))
+
+
+#Plots
+## Z score plots
+z_score$row <- vars$row
+z_score$col <- vars$col
+
+z_score_beta <- z_score[,1:2]
+z_score_beta$row <- vars$row
+z_score_beta$col <- vars$col
+
+# joining to environmental data
+Network_beta = full_join(vars, z_score_beta) %>% 
+  pivot_longer(c(S, WN), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+
+Network_beta$alpha[Network_beta$Beta_value < -1.96] <- 0.6
+Network_beta$alpha[Network_beta$Beta_value >= -1.96 & Network_beta$Beta_value <= +1.96] <- 0.2
+Network_beta$alpha[Network_beta$Beta_value > +1.96] <- 0.6
+
+
+z_score_g1 <- ggplot(Network_beta, aes(dist, Beta_value)) +
+  geom_point(aes(col = Beta_Type), alpha = Network_beta$alpha) +
+        geom_smooth(aes(col = Beta_Type),
+              method="loess", se=T) +
+       labs(y="Z-score", 
+            x="Distance") +
+  geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()
+
+z_score_g2 <- ggplot(Network_beta, aes(grad, Beta_value)) +
+  geom_point(aes(col = Beta_Type), alpha = Network_beta$alpha) +
+        geom_smooth(aes(col = Beta_Type),
+              method="loess", se=T) +
+       labs(y="Z-score", 
+            x="Gradient Dissimilarity") +
+    geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+      geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()
+
+z_score_g1
+z_score_g2
+
+# Plotting rewire species driven turnover z scores
+
+z_score_turn_rewire <- z_score[,3:4]
+z_score_turn_rewire$row <- vars$row
+z_score_turn_rewire$col <- vars$col
+
+turn_rewire_beta = full_join(vars, z_score_turn_rewire) %>% 
+  pivot_longer(c(Rewire, Turnover), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+
+turn_rewire_beta$alpha[turn_rewire_beta$Beta_value < -1.96] <- 0.6
+turn_rewire_beta$alpha[turn_rewire_beta$Beta_value >= -1.96 & turn_rewire_beta$Beta_value <= +1.96] <- 0.2
+turn_rewire_beta$alpha[turn_rewire_beta$Beta_value > +1.96] <- 0.6
+
+
+z_score_g3 <- ggplot(turn_rewire_beta, aes(dist, Beta_value)) +
+  geom_point(aes(col = Beta_Type), alpha = turn_rewire_beta$alpha) +
+        geom_smooth(aes(col = Beta_Type),
+              method="loess", se=T) +
+       labs(y="Z-score", 
+            x="Distance") +
+  geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic() +
+    scale_color_manual(values = c("#D752FF", "#FFD903")) + 
+  theme(legend.position="None")
+
+z_score_g4 <- ggplot(turn_rewire_beta, aes(grad, Beta_value)) +
+  geom_point(aes(col = Beta_Type), alpha = turn_rewire_beta$alpha) +
+        geom_smooth(aes(col = Beta_Type),
+              method="loess", se=T) +
+       labs(y="Z-score", 
+            x="Gradient Dissimilarity") +
+    geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+      geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic() +
+    scale_color_manual(values = c("#D752FF", "#FFD903")) + 
+  theme(legend.position="None")
+
+z_score_g3
+z_score_g4
+
+# Plotting components of species driven turnover z scores
+z_score_species_driven <- z_score[,c(5,6,8,9)]
+
+species_driven_beta = full_join(vars, z_score_species_driven) %>% 
+  pivot_longer(c(Pol_turn,Plant_turn), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+species_driven_beta$alpha[species_driven_beta$Beta_value < -1.96] <- 0.6
+species_driven_beta$alpha[species_driven_beta$Beta_value >= -1.96 & species_driven_beta$Beta_value <= +1.96] <- 0.2
+species_driven_beta$alpha[species_driven_beta$Beta_value > +1.96] <- 0.6
+
+
+z_score_g5 <- ggplot(species_driven_beta, aes(dist, Beta_value)) +
+  geom_point(aes(col = Beta_Type), alpha = species_driven_beta$alpha) +
+        geom_smooth(aes(col = Beta_Type),
+              method="loess", se=T) +
+       labs(y="Beta Diversity", 
+            x="Distance") +
+  geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic() + 
+    scale_color_manual(values = c("#DEA042", "#5CD1BF")) + 
+  theme(legend.position="None")
+
+z_score_g6 <- ggplot(species_driven_beta, aes(grad, Beta_value)) +
+  geom_point(aes(col = Beta_Type), alpha = species_driven_beta$alpha) +
+        geom_smooth(aes(col = Beta_Type),
+              method="loess", se=T) +
+       labs(y="Z-Score", 
+            x="Gradient Dissimilarity") +
+    geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+      geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()+ 
+    scale_color_manual(values = c("#DEA042", "#5CD1BF")) + 
+  theme(legend.position="None")
+
+z_score_g5
+z_score_g6
+
+#plotting plant&pollinator driven turnover, complete substitution
+z_score_both_species_driven <- z_score[,c(7:9)]
+
+species_driven_beta = full_join(vars, z_score_both_species_driven) %>% 
+  pivot_longer(c(Both_turn), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+species_driven_beta$alpha[species_driven_beta$Beta_value < -1.96] <- 0.6
+species_driven_beta$alpha[species_driven_beta$Beta_value >= -1.96 & species_driven_beta$Beta_value <= +1.96] <- 0.2
+species_driven_beta$alpha[species_driven_beta$Beta_value > +1.96] <- 0.6
+
+
+z_score_g7 <- ggplot(species_driven_beta, aes(dist, Beta_value)) +
+  geom_point(aes(col = Beta_Type), alpha = species_driven_beta$alpha) +
+        geom_smooth(aes(col = Beta_Type),
+              method="loess", se=T) +
+       labs(y="Beta Diversity", 
+            x="Distance") +
+  geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+   geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()+ 
+  theme(legend.position="None")
+
+z_score_g8 <- ggplot(species_driven_beta, aes(grad, Beta_value)) +
+  geom_point(aes(col = Beta_Type), alpha = species_driven_beta$alpha) +
+        geom_smooth(aes(col = Beta_Type),
+              method="loess", se=T) +
+       labs(y="Z-Score", 
+            x="Gradient Dissimilarity") +
+    geom_hline(yintercept=-1.96, col="darkgrey", linetype = "longdash") + 
+      geom_hline(yintercept=0, col="darkgrey") + 
+  geom_hline(yintercept=+1.96, col="darkgrey", linetype = "longdash") + 
+       theme_classic()+ 
+  theme(legend.position="None")
+
+z_score_g7
+z_score_g8
+
+#Empirical Plots
+##Rewire v Turvover
+
+b_emp_rewire_turn <- beta_emp[,3:4]
+b_emp_rewire_turn$row <- vars$row
+b_emp_rewire_turn$col <- vars$col
+
+# joining to environmental data
+Network_Rewire_Turn = full_join(vars, b_emp_rewire_turn) %>% 
+  pivot_longer(c(Rewire, Turnover), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+
+
+g3 <- ggplot(Network_Rewire_Turn, aes(dist, Beta_value)) +
+  geom_point(aes(col = Beta_Type), size= 3, alpha = 0.6) +
+        geom_smooth(aes(col = Beta_Type),
+              method="lm", se=T) +
+       labs(y="Species Driven or Rewiring (Proportion)", 
+            x="Spatial Distance in KM") +
+  ylim(0,1) +
+       theme_classic() +
+  scale_color_manual(values = c("#D752FF", "#FFD903")) + 
+  theme(legend.position="None")
+
+g4 <- ggplot(Network_Rewire_Turn, aes(grad, Beta_value)) +
+  geom_point(aes(col = Beta_Type), size= 3, alpha = 0.6) +
+        geom_smooth(aes(col = Beta_Type),
+              method="lm", se=T) +
+       labs(y="Species Driven or Rewiring (Proportion)", 
+            x="Environmental Dissimilarity") +
+  ylim(0,1) +
+       theme_classic()+
+  scale_color_manual(values = c("#D752FF", "#FFD903")) + 
+  theme(legend.position="None")
+
+g3
+g4
+
+
+
+##Plant Turn v Pol Turn
+
+b_emp_PolPla_Turn <- beta_emp[,5:6]
+b_emp_PolPla_Turn$row <- vars$row
+b_emp_PolPla_Turn$col <- vars$col
+
+# joining to environmental data
+Network_PolPla_Turn = full_join(vars, b_emp_PolPla_Turn) %>% 
+  pivot_longer(c(Pol_turn, Plant_turn), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+
+g5 <- ggplot(Network_PolPla_Turn, aes(dist, Beta_value)) +
+  geom_point(aes(col = Beta_Type), size= 3, alpha = 0.6) +
+        geom_smooth(aes(col = Beta_Type),
+              method="loess", se=T) +
+       labs(y="Plant or Pollinator Driven Proportion", 
+            x="Spatial Distance in KM") +
+  ylim(0,1) +
+       theme_classic() +
+  scale_color_manual(values = c("#DEA042", "#5CD1BF")) + 
+  theme(legend.position="None")
+
+g6 <- ggplot(Network_PolPla_Turn, aes(grad, Beta_value)) +
+  geom_point(aes(col = Beta_Type), size= 3, alpha = 0.6) +
+        geom_smooth(aes(col = Beta_Type),
+              method="loess", se=T) +
+       labs(y="Plant or Pollinator Driven Proportion", 
+            x="Environmental Dissimilarity") +
+  ylim(0,1) +
+       theme_classic()+
+  scale_color_manual(values = c("#DEA042", "#5CD1BF")) + 
+  theme(legend.position="None")
+
+g5
+g6
+```
+
+
+```{r}
+##bootstrapping gradient and plant/pol turnover
+base_plot <- ggplot(Network_PolPla_Turn, aes(dist, Beta_value)) +
+  geom_point(aes(col = Beta_Type), size= 3, alpha = 0.6) +
+       labs(y="Plant or Pollinator Driven Proportion", 
+            x="Spatial Distance in KM") +
+  ylim(0,1) +
+       theme_classic() +
+  scale_color_manual(values = c("#DEA042", "#5CD1BF")) + 
+  theme(legend.position="None")
+
+
+library(broom)
+
+Network_PolPla_Turn %>% 
+  filter(Beta_Type == "Pol_turn") -> Pol_turn
+
+Network_PolPla_Turn %>% 
+  filter(Beta_Type == "Plant_turn") -> Pla_turn
+  
+
+
+pol_lowess_model <- lowess(Pol_turn$dist, Pol_turn$Beta_value, 1/3) %>%
+  as_tibble()
+
+pla_lowess_model <- lowess(Pla_turn$dist, Pla_turn$Beta_value, 1/3) %>%
+  as_tibble()
+
+lowess_plot <- base_plot +
+  geom_line(data = pol_lowess_model, aes(x = x, y = y), colour = "#5CD1BF") +
+  geom_line(data = pla_lowess_model, aes(x = x, y = y), colour = "#DEA042")
+
+library(rsample)
+
+
+dist_lowess_fit <- function(split){
+  lowess(analysis(split)$dist, analysis(split)$Beta_value, 1/3)
+}
+
+dist_lowess_predict <- function(fit){
+  approx(fit %>% as_tibble() %>% distinct(), xout = seq(1, 45 , 0.05), rule = 2)
+}
+
+
+dist_pol_step_1 <- bootstraps(Pol_turn, times = 10000) %>%
+  mutate(lowess_points = purrr::map(splits, dist_lowess_fit)) %>%
+  mutate(prediction = purrr::map(lowess_points, dist_lowess_predict)) %>%
+  select(id, prediction) %>%
+  mutate_if(is.list, purrr::map, as_data_frame) %>%
+  unnest()
+
+dist_pol_step_2 <- dist_pol_step_1 %>%
+  group_by(x) %>%
+  summarise(mean = round(mean(y), 2),
+            sd = round(sd(y), 2))
+
+dist_pla_step_1 <- bootstraps(Pla_turn, times = 10000) %>%
+  mutate(lowess_points = purrr::map(splits, dist_lowess_fit)) %>%
+  mutate(prediction = purrr::map(lowess_points, dist_lowess_predict)) %>%
+  select(id, prediction) %>%
+  mutate_if(is.list, purrr::map, as_data_frame) %>%
+  unnest()
+
+dist_pla_step_2 <- dist_pla_step_1 %>%
+  group_by(x) %>%
+  summarise(mean = round(mean(y), 2),
+            sd = round(sd(y), 2))
+
+
+g7 <- lowess_plot + 
+  geom_segment(data = dist_pol_step_2, 
+               aes(x = x, xend = x,
+                   y = mean - 2*sd, yend = mean + 2*sd), colour = "grey20", alpha = 0.1) + 
+  geom_segment(data = dist_pla_step_2, 
+               aes(x = x, xend = x,
+                   y = mean - 2*sd, yend = mean + 2*sd), colour = "grey20", alpha = 0.1)
+```
+
+
+```{r echo=FALSE, message=FALSE, fig.show = 'hold', out.width = '50%', warning=FALSE}
+##bootstrapping gradient and plant/pol turnover
+base_plot <- ggplot(Network_PolPla_Turn, aes(grad, Beta_value)) +
+  geom_point(aes(col = Beta_Type), size= 3, alpha = 0.6) +
+       labs(y="Plant or Pollinator Driven Proportion", 
+            x="Spatial Distance in KM") +
+  ylim(0,1) +
+       theme_classic() +
+  scale_color_manual(values = c("#DEA042", "#5CD1BF")) + 
+  theme(legend.position="None")
+
+
+library(broom)
+
+Network_PolPla_Turn %>% 
+  filter(Beta_Type == "Pol_turn") -> Pol_turn
+
+Network_PolPla_Turn %>% 
+  filter(Beta_Type == "Plant_turn") -> Pla_turn
+  
+
+
+pol_lowess_model <- lowess(Pol_turn$grad, Pol_turn$Beta_value, 1/3) %>%
+  as_tibble()
+
+pla_lowess_model <- lowess(Pla_turn$grad, Pla_turn$Beta_value, 1/3) %>%
+  as_tibble()
+
+lowess_plot <- base_plot +
+  geom_line(data = pol_lowess_model, aes(x = x, y = y), colour = "#5CD1BF") +
+  geom_line(data = pla_lowess_model, aes(x = x, y = y), colour = "#DEA042")
+
+library(rsample)
+
+
+grad_lowess_fit <- function(split){
+  lowess(analysis(split)$grad, analysis(split)$Beta_value, 1/3)
+}
+
+grad_lowess_predict <- function(fit){
+  approx(fit %>% as_tibble() %>% distinct(), xout = seq(1, 99, 0.1), rule = 2)
+}
+
+
+grad_pol_step_1 <- bootstraps(Pol_turn, times = 10000) %>%
+  mutate(lowess_points = purrr::map(splits, grad_lowess_fit)) %>%
+  mutate(prediction = purrr::map(lowess_points, grad_lowess_predict)) %>%
+  select(id, prediction) %>%
+  mutate_if(is.list, purrr::map, as_data_frame) %>%
+  unnest()
+
+grad_pol_step_2 <- grad_pol_step_1 %>%
+  group_by(x) %>%
+  summarise(mean = round(mean(y), 2),
+            sd = round(sd(y), 2))
+
+grad_pla_step_1 <- bootstraps(Pla_turn, times = 10000) %>%
+  mutate(lowess_points = purrr::map(splits, grad_lowess_fit)) %>%
+  mutate(prediction = purrr::map(lowess_points, grad_lowess_predict)) %>%
+  select(id, prediction) %>%
+  mutate_if(is.list, purrr::map, as_data_frame) %>%
+  unnest()
+
+grad_pla_step_2 <- grad_pla_step_1 %>%
+  group_by(x) %>%
+  summarise(mean = round(mean(y), 2),
+            sd = round(sd(y), 2))
+
+
+g8 <- lowess_plot + 
+  geom_segment(data = grad_pol_step_2, 
+               aes(x = x, xend = x,
+                   y = mean - 2*sd, yend = mean + 2*sd), colour = "grey20", alpha = 0.1) + 
+  geom_segment(data = grad_pla_step_2, 
+               aes(x = x, xend = x,
+                   y = mean - 2*sd, yend = mean + 2*sd), colour = "grey20", alpha = 0.1)
+```
+
+
+```{r echo=FALSE, message=FALSE, fig.show = 'hold', out.width = '50%', warning=FALSE}
+
+##Both Turn
+
+b_emp_both_turn <- as.data.frame(beta_emp[,7])
+colnames(b_emp_both_turn) <- "Both_turn"
+b_emp_both_turn$row <- vars$row
+b_emp_both_turn$col <- vars$col
+
+# joining to environmental data
+Network_Both_Turn = full_join(vars, b_emp_both_turn) %>% 
+  pivot_longer(c(Both_turn), 
+             names_to = "Beta_Type",
+             values_to = "Beta_value")
+
+
+Network_Both_Turn$alpha
+
+
+g9 <- ggplot(Network_Both_Turn, aes(dist, Beta_value)) +
+  geom_point(aes(col = Beta_Type), size= 3, alpha = 0.6) +
+        geom_smooth(aes(col = Beta_Type),
+              method="lm", se=T) +
+       labs(y="Pollinator + Plant Driven Proportion", 
+            x="Spatial Distance in KM") +
+  ylim(0,1) +
+       theme_classic() +
+  scale_color_manual(values = c("#D93838")) + 
+  theme(legend.position="None")
+
+g10 <- ggplot(Network_Both_Turn, aes(grad, Beta_value)) +
+  geom_point(aes(col = Beta_Type), size= 3, alpha = 0.6) +
+        geom_smooth(aes(col = Beta_Type),
+              method="lm", se=T) +
+       labs(y="Pollinator + Plant Driven Proportion", 
+            x="Environmental Dissimilarity") +
+  ylim(0,1) +
+       theme_classic()+
+  scale_color_manual(values = c("#D93838")) + 
+  theme(legend.position="None")
+
+g9
+g10
+
+
+library(cowplot)
+(comp_plot <- plot_grid(g3, g7, g9, g4, g8, g10, labels = c("a", "b", "c", "d", "e", "f")))
+ggsave("Rewire_Turnover_PolPla_Both_Plot.svg", comp_plot, device = "svg", width = 30, height = 20, units = "cm")
+
+
+(comp_plot <- plot_grid(z_score_g3, z_score_g5, z_score_g7, z_score_g4,  z_score_g6, z_score_g8, labels = c("a", "b", "c", "d", "e", "f")))
+ggsave("Rewire_Turnover_PolPla_Both_Plot_Z_Scores.svg", comp_plot, device = "svg", width = 30, height = 20, units = "cm")
+```
+
+

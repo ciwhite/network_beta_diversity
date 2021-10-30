@@ -1,0 +1,999 @@
+---
+title: Variation Partitioning of Plant & Pollinator Communities and Interaction Networks
+author: "Cian White"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: '4'
+  html_notebook:
+    number_sections: no
+    theme: flatly
+    toc: yes
+    toc_depth: 4
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+---
+
+See this page for full tutorial
+https://cran.r-project.org/web/packages/adespatial/vignettes/tutorial.html#listw.explore
+
+The package adespatial contains functions for the multiscale analysis of spatial multivariate data. It implements some new functions and reimplements existing functions that were available in packages of the sedaR project hosted on R-Forge (spacemakeR, packfor, AEM, etc.). It can be seen as a bridge between packages dealing with multivariate data (e.g., ade4, Dray and Dufour (2007)) and packages that deals with spatial data (sp, spdep). In adespatial, many methods consider the spatial information as a spatial weighting matrix (SWM), object of class listw provided by the spdep package (Figure 1). The SWM is defined as the Hadamard product (element-wise product) of a connectivity matrix by a weighting matrix. The binary connectivity matrix (spatial neighborhood, object of class nb) defines the pairs of connected and unconnected samples, while the weighting matrix allows weighting the connections, for instance to define that the strength of the connection between two samples decreases with the geographic distance.
+
+Once SWM is defined, it can be used to build Moran’s Eigenvector Maps (MEM; Dray, Legendre, and Peres-Neto (2006)) that are orthogonal vectors maximizing the spatial autocorrelation (measured by Moran’s coefficient). These spatial predictors can be used in multivariate statistical methods to provide spatially-explicit multiscale tools (Dray et al. 2012).
+
+
+```{r}
+#Packages
+library(ade4)
+library(adespatial)
+library(adegraphics)
+library(spdep)
+library(maptools)
+library(vegan)
+library(betalink)
+library(bipartite)
+library(dplyr)
+```
+
+
+```{r}
+#loading data
+network <- read.csv("Cian_White_Interaction_Data_Full.csv")
+
+#have to change a wrong value
+network$Site_ID[network$X == 1949] <- 11
+network$FlowerAbundancePerPlantSpecies[network$X == 1794] <- 10
+network$FlowerVisitorSpecies[network$X == 729] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 829] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 839] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 905] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 922] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 925] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 934] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 1881] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 2298] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies <- gsub(" ", ",", network$FlowerVisitorSpecies)
+
+network$FlowerVisitorSpecies <- as.factor(network$FlowerVisitorSpecies)
+levels(network$FlowerVisitorSpecies)
+
+
+#creating dataframe with site ids and names for reference
+network %>%
+  select(Site_Name, Site_ID)  %>%
+  arrange(Site_ID)  %>%
+  unique() -> Names
+
+#taking out networks from each site (aggregated by month)
+netlist <- frame2webs(network, varnames = c("PlantSpecies",
+                                            "FlowerVisitorSpecies",
+                                            "Site_ID",
+                                            "VisitationFrequency"),
+                      type.out = "list", emptylist = TRUE)
+
+
+#creates I graph objects from the netlist dataframes
+networks <- prepare_networks(netlist, directed = FALSE)
+
+names <- name_networks(as.character(Names$Site_Name)) 
+
+# plant community
+network %>%
+  select(Site_ID, PlantSpecies, FlowerAbundancePerPlantSpecies) %>%
+  mutate(Group = 1) %>%
+   frame2webs(varnames = c("Site_ID",
+                                            "PlantSpecies",
+                                            "Group",
+                                            "FlowerAbundancePerPlantSpecies"),
+                      type.out = "array",
+                      emptylist = TRUE) -> plant_community
+plant_community <- as.data.frame(plant_community)
+colnames(plant_community) <- gsub(".1", "", colnames(plant_community))
+#setting the apis at site three to correct abundance
+plant_community$Hebe.agg[11] <- 0
+plant_community$Oxalis.debilis[11] <- 0
+plant_community$Vicia.sepium[18] <- 4
+#write.csv(plant_community, "Plant_Community.csv")
+
+# pollinator community
+network %>%
+  select(Site_ID, FlowerVisitorSpecies, VisitationFrequency) %>%
+  mutate(Group = 1) %>%
+   frame2webs(varnames = c("Site_ID",
+                                            "FlowerVisitorSpecies",
+                                            "Group",
+                                            "VisitationFrequency"),
+                      type.out = "array",
+                      emptylist = TRUE) -> pollinator_community
+pollinator_community <- as.data.frame(pollinator_community)
+colnames(pollinator_community) <- gsub(".1", "", colnames(pollinator_community))
+#setting the apis at site three to correct abundance
+pollinator_community$Apis.mellifera[3] <- 9
+#setting the diptera at site three to correct abundance
+pollinator_community$Diptera[7]  <- 47
+#setting the meadow brown at site 8 to correct abundance
+pollinator_community$Meadow.brown[8] <- 1
+#setting the bombus luc agg at site 11 to correct abundance
+pollinator_community$`Bombus.lucorum(agg)`[11] <- 18
+#setting the bombus pratorum at site 11 to correct abundance
+pollinator_community$Bombus.pratorum[11] <- 5
+#setting the bombus pratorum at site 11 to correct abundance
+pollinator_community$Bombus.pratorum[11] <- 5
+
+```
+
+
+Modifying Plant Names, adding in Plant Family and whether the species is Native or Introduced
+```{r}
+network$PlantSpecies <- as.factor(network$PlantSpecies)
+
+levels(as.factor(network$PlantSpecies))
+
+network$PlantSpecies <- as.character(network$PlantSpecies)
+
+network$Introduced.[network$PlantSpecies == "Achillea.millefolium"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Achillea.millefolium"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Aconitum.napellus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Aconitum.napellus"] <- "Ranunculaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Aegopodium.padagraria"] <- "Aegopodium.podagraria"
+network$Introduced.[network$PlantSpecies == "Aegopodium.podagraria"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Aconitum.napellus"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Agapanthus.sp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Aconitum.napellus"] <- "Amaryllidaceae"
+
+network$Introduced.[network$PlantSpecies == "Ajuga.reptans"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ajuga.reptans"] <- "Lamiaceae"
+
+network$Introduced.[network$PlantSpecies == "Alcea.rosea"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Alcea.rosea"] <- "Malvaceae"
+                   
+network$Introduced.[network$PlantSpecies == "Alliaria.petiolata"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Alliaria.petiolata"] <- "Brassicaceae" 
+
+network$Introduced.[network$PlantSpecies == "Allium.schoenoprasum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Allium.schoenoprasum"] <- "Amaryllidaceae"  
+                    
+network$Introduced.[network$PlantSpecies == "Allium.triquetrum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Allium.triquetrum"] <- "Amaryllidaceae"  
+
+network$Introduced.[network$PlantSpecies == "Alstroemeria.spp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Alstroemeria.spp"] <- "Alstroemeriaceae"  
+        
+network$Introduced.[network$PlantSpecies == "Anthriscus.sylvestris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Anthriscus.sylvestris"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Anthyllis.vulneraria"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Anthyllis.vulneraria"] <- "Fabaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Antirrhinum.agg"] <- "Antirrhinum.majus"
+network$Introduced.[network$PlantSpecies == "Antirrhinum.majus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Antirrhinum.majus"] <- "Plantaginaceae"
+
+network$Introduced.[network$PlantSpecies == "Astrantia.major"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Astrantia.major"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Aubrieta.deltoidea"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Aubrieta.deltoidea"] <- "Brassicaceae" 
+
+network$Introduced.[network$PlantSpecies == "Barbarea.vulgaris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Barbarea.vulgaris"] <- "Brassicaceae" 
+
+network$Introduced.[network$PlantSpecies == "Begonia.semperflorens"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Begonia.semperflorens"] <- "Begoniaceae" 
+                
+network$Introduced.[network$PlantSpecies == "Bellis.perennis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Bellis.perennis"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Berberis.darwinii"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Berberis.darwinii"] <- "Berberidaceae"
+
+network$Introduced.[network$PlantSpecies == "Berberis.sp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Berberis.sp"] <- "Berberidaceae" 
+                  
+network$Introduced.[network$PlantSpecies == "Blue.Flower"] <- NA
+network$Plant_Family[network$PlantSpecies == "Blue.Flower"] <- NA     
+
+network$Introduced.[network$PlantSpecies == "Brassica.rapa"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Brassica.rapa"] <- "Brassicaceae"  
+
+network$Introduced.[network$PlantSpecies == "Buddleja.davidii"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Buddleja.davidii"] <- "Scrophulariaceae"    
+
+network$Introduced.[network$PlantSpecies == "Buddleja.globosa"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Buddleja.globosa"] <- "Scrophulariaceae"
+
+network$Introduced.[network$PlantSpecies == "Bunias.orientalis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Bunias.orientalis"] <- "Brassicaceae"
+
+network$Introduced.[network$PlantSpecies == "Buxus.sempervirens"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Buxus.sempervirens"] <- "Buxaceae" 
+
+network$Introduced.[network$PlantSpecies == "Calibrachoa.parviflora"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Calibrachoa.parviflora"] <- "Solanaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Calysteiga.sepium"] <- "Calystegia.sepium"
+network$Introduced.[network$PlantSpecies == "Calystegia.sepium"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Calystegia.sepium"] <- "Solanaceae"
+
+network$Introduced.[network$PlantSpecies == "Campanula.portenschlagia"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Campanula.portenschlagia"] <- "Campanulaceae"
+
+network$Introduced.[network$PlantSpecies == "Campanula.rotundifolia"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Campanula.rotundifolia"] <- "Campanulaceae"
+
+network$Introduced.[network$PlantSpecies == "Capsella.bursa-pastoris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Capsella.bursa-pastoris"] <- "Brassicaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Cardamine.hirsutum"] <- "Cardamine.hirsuta"
+network$Introduced.[network$PlantSpecies == "Cardamine.hirsuta"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cardamine.hirsuta"] <- "Brassicaceae"
+
+network$Introduced.[network$PlantSpecies == "Cardamine.pratensis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cardamine.pratensis"] <- "Brassicaceae"
+
+network$Introduced.[network$PlantSpecies == "Ceanothus.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Ceanothus.agg"] <- "Rhamnaceae"
+
+network$Introduced.[network$PlantSpecies == "Centaurea.cyanus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Centaurea.cyanus"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Centaurea.nigra"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Centaurea.nigra"] <- "Asteraceae"
+           
+network$Introduced.[network$PlantSpecies == "Centranthus.ruber"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Centranthus.ruber"] <- "Caprifoliaceae"
+
+network$Introduced.[network$PlantSpecies == "Cerastium.fontanum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cerastium.fontanum"] <- "Caryophyllaceae"  
+
+network$Introduced.[network$PlantSpecies == "Cerastium.tomentosum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cerastium.tomentosum"] <- "Caryophyllaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Chamerion.anguistifolium"] <- "Chamaenerion.angustifolium"
+network$Introduced.[network$PlantSpecies == "Chamaenerion.angustifolium"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Chamaenerion.angustifolium"] <- "Onagraceae"
+                     
+network$Introduced.[network$PlantSpecies == "Chenopodium.album"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Chenopodium.album"] <- "Amaranthaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Chrysanthemum.segtum"] <- "Chrysanthemum.segetum"
+network$Introduced.[network$PlantSpecies == "Chrysanthemum.segetum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Chrysanthemum.segetum"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Circaea.lutetiana"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Circaea.lutetiana"] <- "Onagraceae"
+
+network$Introduced.[network$PlantSpecies == "Cirsium.arvense"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cirsium.arvense"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Cirsium.palustre"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cirsium.palustre"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Cirsium.vulgare"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cirsium.vulgare"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Cistus.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cistus.agg"] <- "Cistaceae"     
+
+network$Introduced.[network$PlantSpecies == "Conopodium.majus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Conopodium.majus"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Cornus.alba(Crimsam)"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cornus.alba(Crimsam)"] <- "Cornaceae" 
+                   
+network$Introduced.[network$PlantSpecies == "Cotoneaster.franchetii"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cotoneaster.franchetii"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Cotoneaster.frigidus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cotoneaster.frigidus"] <- "Rosaceae"   
+
+network$Introduced.[network$PlantSpecies == "Cotoneaster.hybridus.pendulus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cotoneaster.hybridus.pendulus"] <- "Rosaceae"   
+                    
+network$Introduced.[network$PlantSpecies == "Crataegus.monogyna"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Crataegus.monogyna"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Crepis.biennis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Crepis.biennis"] <- "Asteraceae"  
+        
+network$Introduced.[network$PlantSpecies == "Crepis.capillaris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Crepis.capillaris"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Crocosmia.xcrocosmiiflora"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Crocosmia.xcrocosmiiflora"] <- "Iridaceae"
+
+network$Introduced.[network$PlantSpecies == "Cytisus.scoparius"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cytisus.scoparius"] <- "Fabaceae" 
+
+network$Introduced.[network$PlantSpecies == "Daucus.carota"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Daucus.carota"] <- "Apiaceae" 
+
+network$Introduced.[network$PlantSpecies == "Dianthus.caryophyllus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Dianthus.caryophyllus"] <- "Caryophyllaceae" 
+
+network$Introduced.[network$PlantSpecies == "Digitalis.purpurea"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Digitalis.purpurea"] <- "Plantaginaceae" 
+
+network$Introduced.[network$PlantSpecies == "Dimorphotheca.ecklonis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Dimorphotheca.ecklonis"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Diplotaxis.tenuifolia"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Diplotaxis.tenuifolia"] <- "Brassicaceae"
+
+network$Introduced.[network$PlantSpecies == "Epilobium.hirsutum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Epilobium.hirsutum"] <- "Onagraceae"
+
+network$Introduced.[network$PlantSpecies == "Epilobium.montanum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Epilobium.montanum"] <- "Onagraceae" 
+
+network$Introduced.[network$PlantSpecies == "Epilobium.parviflorum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Epilobium.parviflorum"] <- "Onagraceae" 
+
+network$Introduced.[network$PlantSpecies == "Erica.spp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Erica.spp"] <- "Ericaceae"
+
+network$Introduced.[network$PlantSpecies == "Erigeron.glaucus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Erigeron.glaucus"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Erysimum.spp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Erysimum.spp"] <- "Brassicaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Escallonia.macrantha"] <- "Escallonia.rubra.var.macrantha"
+network$Introduced.[network$PlantSpecies == "Escallonia.rubra.var.macrantha"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Escallonia.rubra.var.macrantha"] <- "Escalloniaceae" 
+
+network$Introduced.[network$PlantSpecies == "Fallopia.baldschuanica"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Fallopia.baldschuanica"] <- "Polygonaceae"
+
+network$Introduced.[network$PlantSpecies == "Ficaria.verna"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ficaria.verna"] <- "Ranunculaceae"
+
+network$Introduced.[network$PlantSpecies == "Filipendula.ulmaria"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Filipendula.ulmaria"] <- "Rosaceae" 
+               
+network$Introduced.[network$PlantSpecies == "Fuchsia.(cult)"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Fuchsia.(cult)"] <- "Onagraceae"
+
+network$Introduced.[network$PlantSpecies == "Fuchsia.magellanica"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Fuchsia.magellanica"] <- "Onagraceae"
+
+network$PlantSpecies[network$PlantSpecies == "Fumaria.officianalis"] <- "Fumaria.officinalis"
+network$Introduced.[network$PlantSpecies == "Fumaria.officinalis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Fumaria.officinalis"] <- "Papaveraceae"
+
+network$Introduced.[network$PlantSpecies == "Geranium.(cult)"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Geranium.(cult)"] <- "Geraniaceae"
+
+network$Introduced.[network$PlantSpecies == "Geranium.pratense"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Geranium.pratense"] <- "Geraniaceae" 
+
+network$Introduced.[network$PlantSpecies == "Geranium.pyrenaicum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Geranium.pyrenaicum"] <- "Geraniaceae"
+
+network$Introduced.[network$PlantSpecies == "Geranium.robertianum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Geranium.robertianum"] <- "Geraniaceae"
+
+network$Introduced.[network$PlantSpecies == "Geranium.versicolor"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Geranium.versicolor"] <- "Geraniaceae"  
+                      
+network$Introduced.[network$PlantSpecies == "Grass"] <- NA
+network$Plant_Family[network$PlantSpecies == "Grass"] <- NA                   
+               
+network$Introduced.[network$PlantSpecies == "Hebe.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Hebe.agg"] <- "Plantaginaceae" 
+
+network$Introduced.[network$PlantSpecies == "Helichrysum.italicum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Helichrysum.italicum"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Heracleum.sphondylium"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Heracleum.sphondylium"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Heuchera.cult"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Heuchera.cult"] <- "Saxifragaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Hycainthoides.non-scripta"] <- "Hyacinthoides.non-scripta"
+network$Introduced.[network$PlantSpecies == "Hyacinthoides.non-scripta"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Hyacinthoides.non-scripta"] <- "Asparagaceae" 
+
+network$Introduced.[network$PlantSpecies == "Hydrangea.cult"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Hydrangea.cult"] <- "Hydrangeaceae"
+         
+network$Introduced.[network$PlantSpecies == "Hypericum.androsaemum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Hypericum.androsaemum"] <- "Hypericaceae"
+
+network$Introduced.[network$PlantSpecies == "Hypericum.perforatum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Hypericum.perforatum"] <- "Hypericaceae"
+
+network$Introduced.[network$PlantSpecies == "Hypochaeris.radicata"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Hypochaeris.radicata"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Iris.pseudacorus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Iris.pseudacorus"] <- "Iridaceae"
+
+network$Introduced.[network$PlantSpecies == "Knautia.arvensis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Knautia.arvensis"] <- "Caprifoliaceae"
+
+network$Introduced.[network$PlantSpecies == "Laburnum.xwatereri"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Laburnum.xwatereri"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Lamium.purpureum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Lamium.purpureum"] <- "Lamiaceae"
+
+network$Introduced.[network$PlantSpecies == "Lapsana.communis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Lapsana.communis"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Lathyrus.odoratus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Lathyrus.odoratus"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Lathyrus.pratensis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Lathyrus.pratensis"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Lavandula.angustifolia"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Lavandula.angustifolia"] <- "Lamiaceae"
+
+network$Introduced.[network$PlantSpecies == "Leontodon.autumnalis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Leontodon.autumnalis"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Leontodon.hispidus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Leontodon.hispidus"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Leontodon.saxatilis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Leontodon.saxatilis"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Leucanthemum.vulgare"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Leucanthemum.vulgare"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Leucanthemum.xsuperbum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Leucanthemum.xsuperbum"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Ligustrum.vulgare"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ligustrum.vulgare"] <- "Oleaceae"
+
+network$Introduced.[network$PlantSpecies == "Linaria.purpurea"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Linaria.purpurea"] <- "Plantaginaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Linum.usitatissimum"] <- "Linum.bienne"
+network$Introduced.[network$PlantSpecies == "Linum.bienne"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Linum.bienne"] <- "Linaceae"
+
+network$Introduced.[network$PlantSpecies == "Lonicera.nitida"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Lonicera.nitida"] <- "Caprifoliaceae"
+
+network$Introduced.[network$PlantSpecies == "Lonicera.periclymenum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Lonicera.periclymenum"] <- "Caprifoliaceae"
+
+network$Introduced.[network$PlantSpecies == "Lotus.corniculatus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Lotus.corniculatus"] <- "Fabaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Malus.prunifolia"] <- "Malus.sylvestris"
+network$Introduced.[network$PlantSpecies == "Malus.sylvestris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Malus.sylvestris"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Malus.pumila"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Malus.pumila"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Malva.arborea"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Malva.arborea"] <- "Malvaceae"
+
+network$Introduced.[network$PlantSpecies == "Malva.sylvestris"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Malva.sylvestris"] <- "Malvaceae"
+            
+network$Introduced.[network$PlantSpecies == "Mentha.×piperita"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Mentha.×piperita"] <- "Lamiaceae"    
+
+network$Introduced.[network$PlantSpecies == "Nepeta.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Nepeta.agg"] <- "Lamiaceae"
+
+network$Introduced.[network$PlantSpecies == "Odontites.vernus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Odontites.vernus"] <- "Orobanchaceae"
+
+network$Introduced.[network$PlantSpecies == "Oxalis.debilis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Oxalis.debilis"] <- "Oxalidaceae"
+
+network$Introduced.[network$PlantSpecies == "Papaver.somniferum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Papaver.somniferum"] <- "Papaveraceae"
+
+network$Introduced.[network$PlantSpecies == "Pelargonium.cult"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Pelargonium.cult"] <- "Geraniaceae"
+
+network$Introduced.[network$PlantSpecies == "Penstemon.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Penstemon.agg"] <- "Plantaginaceae"  
+                   
+network$Introduced.[network$PlantSpecies == "Pentaglottis.sempervirens"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Pentaglottis.sempervirens"] <- "Boraginaceae"  
+
+network$Introduced.[network$PlantSpecies == "Persicaria.maculosa"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Persicaria.maculosa"] <- "Polygonaceae"
+
+network$Introduced.[network$PlantSpecies == "Petunia.xatkinsiana"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Petunia.xatkinsiana"] <- "Solanaceae"
+
+network$Introduced.[network$PlantSpecies == "Pink Aster"] <- NA
+network$Plant_Family[network$PlantSpecies == "Pink Aster"] <- "Asteraceae"  
+
+network$Introduced.[network$PlantSpecies == "Pink.Flower"] <- NA
+network$Plant_Family[network$PlantSpecies == "Pink.Flower"] <- NA  
+
+network$Introduced.[network$PlantSpecies == "Plantago.lanceolata"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Plantago.lanceolata"] <- "Plantaginaceae"  
+                           
+network$Introduced.[network$PlantSpecies == "Potentilla.erecta"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Potentilla.erecta"] <- "Rosaceae"  
+
+network$Introduced.[network$PlantSpecies == "Potentilla.reptans"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Potentilla.reptans"] <- "Rosaceae"  
+                            
+network$Introduced.[network$PlantSpecies == "Primula.veris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Primula.veris"] <- "Primulaceae" 
+
+network$Introduced.[network$PlantSpecies == "Prunus.spinosa"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Prunus.spinosa"] <- "Rosaceae" 
+
+network$Introduced.[network$PlantSpecies == "Purple.Flower.Hemp"] <- NA
+network$Plant_Family[network$PlantSpecies == "Purple.Flower.Hemp"] <- NA
+
+network$Introduced.[network$PlantSpecies == "Purple.Tongue.Flower"] <- NA
+network$Plant_Family[network$PlantSpecies == "Purple.Tongue.Flower"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "Pyracantha.spp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Pyracantha.spp"] <- "Rosaceae"                
+
+network$Introduced.[network$PlantSpecies == "Ranunculus.acris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ranunculus.acris"] <- "Ranunculaceae" 
+
+network$Introduced.[network$PlantSpecies == "Ranunculus.repens"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ranunculus.repens"] <- "Ranunculaceae"
+
+network$Introduced.[network$PlantSpecies == "RED FLOWER"] <- NA
+network$Plant_Family[network$PlantSpecies == "RED FLOWER"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "Reseda.luteola"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Reseda.luteola"] <- "Resedaceae"
+
+network$Introduced.[network$PlantSpecies == "Rhinanthus.minor"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Rhinanthus.minor"] <- "Orobanchaceae"
+
+network$Introduced.[network$PlantSpecies == "Rhododendron.davidii"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Rhododendron.davidii"] <- "Ericaceae"
+
+network$Introduced.[network$PlantSpecies == "Rhus.typhina.sp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Rhus.typhina.sp"] <- "Anacardiaceae"
+
+network$Introduced.[network$PlantSpecies == "Ribes.sanguineum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Ribes.sanguineum"] <- "Grossulariaceae"
+
+network$Introduced.[network$PlantSpecies == "Rorippa.nasturtium-aquaticum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Rorippa.nasturtium-aquaticum"] <- "	Brassicaceae"
+
+network$Introduced.[network$PlantSpecies == "Rosa.canina"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Rosa.canina"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Rosa.cult"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Rosa.cult"] <- "Rosaceae"                         
+
+network$Introduced.[network$PlantSpecies == "Rosa.rubignosa"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Rosa.rubignosa"] <- "Rosaceae"       
+
+network$Introduced.[network$PlantSpecies == "Rosa.cult"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Rosa.cult"] <- "Rosaceae"  
+
+network$Introduced.[network$PlantSpecies == "Rosmarinus.officinalis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Rosmarinus.officinalis"] <- "Lamiaceae" 
+
+network$Introduced.[network$PlantSpecies == "Rubus.fruticosus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Rubus.fruticosus"] <- "Rosaceae" 
+
+network$Introduced.[network$PlantSpecies == "Sallix.spp"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Sallix.spp"] <- "Salicaceae" 
+
+network$Introduced.[network$PlantSpecies == "Salvia.microphylla"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Salvia.microphylla"] <- "Lamiaceae"
+
+network$Introduced.[network$PlantSpecies == "Salvia.officinalis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Salvia.officinalis"] <- "Lamiaceae" 
+
+network$Introduced.[network$PlantSpecies == "Scabiosa.columbaria"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Scabiosa.columbaria"] <- "Caprifoliaceae" 
+
+network$Introduced.[network$PlantSpecies == "Scrophularia.auriculata"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Scrophularia.auriculata"] <- "Scrophulariaceae" 
+
+network$Introduced.[network$PlantSpecies == "Sedum.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Sedum.agg"] <- "Crassulaceae" 
+
+network$PlantSpecies[network$PlantSpecies == "Senecio.greyii"] <- "Brachyglottis.greyi"
+network$Introduced.[network$PlantSpecies == "Brachyglottis.greyi"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Brachyglottis.greyi"] <- "Asteraceae" 
+               
+network$Introduced.[network$PlantSpecies == "Senecio.jacobaea"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Senecio.jacobaea"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Silene.dioica"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Silene.dioica"] <- "Caryophyllaceae" 
+
+network$Introduced.[network$PlantSpecies == "Silene.dioica"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Silene.dioica"] <- "Caryophyllaceae" 
+
+network$Introduced.[network$PlantSpecies == "Sinapsis.arvensis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Sinapsis.arvensis"] <- "Brassicaceae" 
+
+network$Introduced.[network$PlantSpecies == "Smyrnium.olusatrum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Smyrnium.olusatrum"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Solanum.tuberosum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Solanum.tuberosum"] <- "Solanaceae" 
+                                    
+network$Introduced.[network$PlantSpecies == "Sonchus.arvensis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Sonchus.arvensis"] <- "Asteraceae" 
+                                    
+network$Introduced.[network$PlantSpecies == "Sonchus.asper"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Sonchus.asper"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Spikey white and pink flowered bush"] <- NA
+network$Plant_Family[network$PlantSpecies == "Spikey white and pink flowered bush"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "Spiraea.japonica"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Spiraea.japonica"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Spiraea.xarguta"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Spiraea.xarguta"] <- "Rosaceae" 
+
+network$Introduced.[network$PlantSpecies == "Spiraea.xbillardii"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Spiraea.xbillardii"] <- "Rosaceae" 
+
+network$Introduced.[network$PlantSpecies == "Stachys.byzantina"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Stachys.byzantina"] <- "Lamiaceae" 
+
+network$Introduced.[network$PlantSpecies == "Stellaria.graminea"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Stellaria.graminea"] <- "Caryophyllaceae" 
+
+network$Introduced.[network$PlantSpecies == "Stellaria.media"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Stellaria.media"] <- "Caryophyllaceae"                      
+                   
+network$Introduced.[network$PlantSpecies == "Symphoricarpos.albus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Symphoricarpos.albus"] <- "Caprifoliaceae"                      
+
+network$Introduced.[network$PlantSpecies == "Symphytum.×uplandicum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Symphytum.×uplandicum"] <- "Boraginaceae"                      
+     
+network$Introduced.[network$PlantSpecies == "Tagetes.patula"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Tagetes.patula"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Tanacetum.parthenium"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Tanacetum.parthenium"] <- "Asteraceae" 
+               
+network$Introduced.[network$PlantSpecies == "Tanacetum.vulgare"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Tanacetum.vulgare"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Taraxacum.agg"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Taraxacum.agg"] <- "Asteraceae" 
+
+network$PlantSpecies[network$PlantSpecies == "Tillia.xeuropaea"] <- "Tilia.xeuropaea"
+network$Introduced.[network$PlantSpecies == "Tilia.xeuropaea"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Tilia.xeuropaea"] <- "Malvaceae"
+
+network$Introduced.[network$PlantSpecies == "Trachelospermum.jasminoides"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Trachelospermum.jasminoides"] <- "Apocynaceae"
+               
+network$Introduced.[network$PlantSpecies == "Trifolium.pratense"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Trifolium.pratense"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Trifolium.repens"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Trifolium.repens"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Ulex.europaeus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ulex.europaeus"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Verbena.bonariensis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Verbena.bonariensis"] <- "Verbenaceae"
+
+network$Introduced.[network$PlantSpecies == "Veronica.chamaedrys"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Veronica.chamaedrys"] <- "Plantaginaceae"
+
+network$Introduced.[network$PlantSpecies == "Veronica.persica"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Veronica.persica"] <- "Plantaginaceae"
+         
+network$Introduced.[network$PlantSpecies == "Viburnum.tinus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Viburnum.tinus"] <- "Adoxaceae"                   
+
+network$Introduced.[network$PlantSpecies == "Vicia.sativa"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Vicia.sativa"] <- "Fabaceae"             
+
+network$Introduced.[network$PlantSpecies == "Vicia.sepium"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Vicia.sepium"] <- "Fabaceae"     
+
+network$Introduced.[network$PlantSpecies == "Viola.odorata"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Viola.odorata"] <- "Violaceae" 
+
+network$Introduced.[network$PlantSpecies == "Weigela.kosteriana.variegata"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Weigela.kosteriana.variegata"] <- "Caprifoliaceae" 
+
+network$Introduced.[network$PlantSpecies == "White flower grey leaves"] <- NA
+network$Plant_Family[network$PlantSpecies == "White flower grey leaves"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "White.Flower"] <- NA
+network$Plant_Family[network$PlantSpecies == "White.Flower"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "White thorn like flower bus no spikes"] <- NA
+network$Plant_Family[network$PlantSpecies == "White thorn like flower bus no spikes"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "White.Tree.Flower"] <- NA
+network$Plant_Family[network$PlantSpecies == "White.Tree.Flower"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "Yellow.Aster"] <- NA
+network$Plant_Family[network$PlantSpecies == "Yellow.Aster"] <- NA 
+
+
+levels(as.factor(network$Introduced.))
+levels(as.factor(network$Plant_Family))
+network$PlantSpecies <- as.factor(network$PlantSpecies)
+
+```
+
+
+
+
+```{r}
+#Presence absence data, don't need to use hellinger standardisation
+pollinator_community[pollinator_community > 0] <- 1
+#pollinator_community_hell <- decostand(pollinator_community, method = "hellinger")
+
+#Presence absence data, don't need to use hellinger standardisation
+plant_community[plant_community > 0] <- 1
+#plant_community_hell <- decostand(plant_community, method = "hellinger")
+
+Coord <- read.csv("Coordinates.csv") %>% 
+  select(X, Y) %>% 
+  mutate(X_KM = (X - 680000)/1000, Y_KM = (Y - 720000)/1000) %>% 
+  select(X_KM, Y_KM)
+
+Sites <- read.csv("Sites.csv")
+```
+
+
+
+### MULTISPATI analysis
+
+
+
+```{r}
+pla.pca.hell <- dudi.pca(plant_community, scale = FALSE, scannf = FALSE, nf = 2)
+
+pol.pca.hell <- dudi.pca(pollinator_community, scale = FALSE, scannf = FALSE, nf = 2)
+
+```
+
+
+Different SWMs can be defined for a given data set. An important issue concerns the selection of a SWM. This choice can be driven by biological hypotheses but a data-driven procedure is provided by the `listw.select` function. A list of potential candidates can be built using the `listw.candidates` function. Here, we create four candidates using two definitions for neighborhood (Gabriel and Relative graphs using `c("gab", "rel"))` and two weighting functions (binary and linear using `c("bin", "flin"))`:
+
+```{r}
+cand.lw <- listw.candidates(Coord, nb = c("dnear"), weights = c("flin"))
+```
+
+
+The function `listw.select` proposes different methods for selecting a SWM (Bauman, Drouet, Fortin, et al. 2018). The procedure is very similar to the one proposed by `mem.select` except that p-value corrections are applied on global tests taking into account the fact that several candidates are used. By default `(method = "FWD")`, it applies forward selection on the significant SWMs and selects among these the SWM for which the subset of MEMs yields the highest adjusted R.
+
+```{r}
+sel.lw.pla <- listw.select(pla.pca.hell$tab, candidates = cand.lw, nperm = 99)
+
+sel.lw.pol <- listw.select(pol.pca.hell$tab, candidates = cand.lw, nperm = 99)
+```
+
+
+
+A summary of the procedure is available:
+```{r}
+sel.lw.pla$candidates
+sel.lw.pla$best.id
+
+sel.lw.pol$candidates
+sel.lw.pol$best.id
+```
+
+The corresponding SWM can be obtained by
+```{r}
+lw.best.pla <- cand.lw[[sel.lw.pla$best.id]]
+#The subset of MEMs corresponding to the best SWM is also returned by the function:
+sel.lw.pla$best
+
+lw.best.pol <- cand.lw[[sel.lw.pol$best.id]]
+#The subset of MEMs corresponding to the best SWM is also returned by the function:
+sel.lw.pol$best
+```
+
+
+
+
+### Variation partitioning
+
+Spatial structures identified by Redundancy Analysis in the previous section can be due to niche filtering or other processes (e.g., neutral dynamics). Variation partitioning (Borcard, Legendre, and Drapeau 1992) based on adjusted R2 (Peres-Neto et al. 2006) can be used to identify the part of spatial structures that can be explained or not by environmental predictors. This method is implemented in the function varpart of package vegan that is able to deal with up to four tables of predictors:
+```{r}
+library(vegan)
+
+vp1 <- varpart(pla.pca.hell$tab, Sites[,7:11], sel.lw.pla$best$MEM.select)
+vp1
+plot(vp1, bg = c(3, 5), Xnames = c("environment", "spatial"))
+
+
+vp2 <- varpart(pol.pca.hell$tab, Sites[,7:11], sel.lw.pol$best$MEM.select)
+vp2
+plot(vp2, bg = c(3, 5), Xnames = c("environment", "spatial"))
+```
+
+
+
+
+
+### Now for the interaction network
+
+
+
+making unique interactions dataset
+```{r}
+
+unique_interations <- unique(c(plyr::aaply(igraph::get.edgelist(networks[[1]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[2]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[3]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[4]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[5]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[6]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[7]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[8]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[9]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[10]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[11]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[12]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[13]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[14]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[15]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[16]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[17]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[18]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[19]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[20]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--")),
+plyr::aaply(igraph::get.edgelist(networks[[21]]), 1, function(x) stringr::str_c(x, 
+                                                                              collapse = "--"))))
+
+Network_Matrix <- matrix(data = NA, nrow = 21, ncol = 854)
+colnames(Network_Matrix) <- unique_interations
+
+
+
+
+bg = igraph::graph.incidence(netlist[[1]], weighted =TRUE)
+
+
+interaction_weights_list <- list()
+
+for(i in seq_along(1:21)){
+interaction_weights_list[[i]] <- as.data.frame(cbind(igraph::edge_attr(igraph::graph.incidence(netlist[[i]], weighted =TRUE))$weight, plyr::aaply(igraph::get.edgelist(networks[[i]]), 1, function(x) stringr::str_c(x,  collapse = "--"))))
+}
+
+
+interaction_weights_list[[1]]$V2 == 
+length(as.numeric(interaction_weights_list[[1]]$V1))
+
+i=1
+e=1
+f=1
+
+for(i in seq_along(1:21)){
+  for(e in seq_along(1:854)){
+    for(f in seq_along(1:length(as.numeric(interaction_weights_list[[i]]$V1)))){
+      
+    if(colnames(Network_Matrix)[e] == interaction_weights_list[[i]]$V2[f])
+    Network_Matrix[i,e] <- interaction_weights_list[[i]]$V1[f]
+    else(next)
+    }
+  }
+}
+
+Network_Matrix <- as.data.frame(Network_Matrix)
+Network_Matrix[is.na(Network_Matrix)] <- 0
+
+for(e in seq_along(1:854)){
+Network_Matrix[,e] <- as.numeric(Network_Matrix[,e])
+}
+
+
+  
+```
+
+### MULTISPATI analysis
+
+When multivariate data are considered, it is possible to search for spatial structures by computing univariate statistics (e.g., Moran’s Coefficient) on each variable separately. Another alternative is to summarize data by multivariate methods and then detect spatial structures using the output of the analysis. For instance, we applied a centred principal component analysis on the abundance data:
+
+```{r}
+Network_Matrix_hell <- decostand(Network_Matrix, "hellinger")
+
+pca.hell.net <- dudi.pca(Network_Matrix_hell, scale = FALSE, scannf = FALSE, nf = 2)
+```
+
+
+### Selection of SWM and MEM
+
+Different SWMs can be defined for a given data set. An important issue concerns the selection of a SWM. This choice can be driven by biological hypotheses but a data-driven procedure is provided by the `listw.select` function. A list of potential candidates can be built using the `listw.candidates` function. Here, we create four candidates using two definitions for neighborhood (Gabriel and Relative graphs using `c("gab", "rel"))` and two weighting functions (binary and linear using `c("bin", "flin"))`:
+
+```{r}
+cand.lw <- listw.candidates(Coord, nb = c("gab", "rel", "pcnm", "dnear"), weights = c("bin", "flin"))
+```
+
+
+The function `listw.select` proposes different methods for selecting a SWM (Bauman, Drouet, Fortin, et al. 2018). The procedure is very similar to the one proposed by `mem.select` except that p-value corrections are applied on global tests taking into account the fact that several candidates are used. By default `(method = "FWD")`, it applies forward selection on the significant SWMs and selects among these the SWM for which the subset of MEMs yields the highest adjusted R.
+
+```{r}
+sel.lw.net <- listw.select(pca.hell.net$tab, candidates = cand.lw, nperm = 99)
+```
+
+
+
+A summary of the procedure is available:
+```{r}
+sel.lw.net$candidates
+
+sel.lw.net$best.id
+```
+
+The corresponding SWM can be obtained by
+```{r}
+lw.best.net <- cand.lw[[sel.lw.net$best.id]]
+#The subset of MEMs corresponding to the best SWM is also returned by the function:
+
+sel.lw.net$best
+```
+
+
+
+### Variation partitioning
+
+Spatial structures identified by Redundancy Analysis in the previous section can be due to niche filtering or other processes (e.g., neutral dynamics). Variation partitioning (Borcard, Legendre, and Drapeau 1992) based on adjusted R2 (Peres-Neto et al. 2006) can be used to identify the part of spatial structures that can be explained or not by environmental predictors. This method is implemented in the function varpart of package vegan that is able to deal with up to four tables of predictors:
+```{r}
+library(vegan)
+
+vp3 <- varpart(pca.hell.net$tab, Sites[,7:11], sel.lw.net$best$MEM.select)
+vp3
+
+vp5 <- varpart(pca.hell.net$tab, Sites[,7:11], pla.pca.hell$l1, sel.lw.net$best$MEM.select)
+vp5
+
+vp6 <- varpart(pca.hell.net$tab, Sites[,7:11], pol.pca.hell$l1, sel.lw.net$best$MEM.select)
+vp6
+
+vp4 <- varpart(pca.hell.net$tab, Sites[,7:11], pla.pca.hell$l1, pol.pca.hell$l1, sel.lw.net$best$MEM.select)
+vp4
+
+plot(vp3, bg = c(3, 5), Xnames = c("environment", "spatial"))
+
+plot(vp4, bg = c(3, 5, 7, 1), Xnames = c("environment", "spatial", "plant b", "pol b"))
+
+plot(vp5, bg = c(3, 5, 7), Xnames = c("environment", "spatial", "plant b"))
+
+plot(vp6, bg = c(3, 5, 1), Xnames = c("environment", "spatial", "pol b"))
+
+```

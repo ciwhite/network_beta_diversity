@@ -1,0 +1,2711 @@
+---
+title: Modelling Interaction Turnover due to Rewiring and Species Driven Turnover
+author: "Cian White"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: '4'
+  html_notebook:
+    number_sections: no
+    theme: flatly
+    toc: yes
+    toc_depth: 4
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+---
+
+
+#Dataset Loading and Preperation
+
+loading
+```{r echo=FALSE, message=FALSE, results='hide', warning=FALSE}
+library(plyr)
+library(dplyr)
+library(tidyverse)
+library(reshape2)
+library(kableExtra)
+library(bipartite)
+library(betalink)
+
+network <- read.csv("Cian_White_Interaction_Data_Full.csv")
+
+#have to change a wrong value
+network$Site_ID[network$X == 1949] <- 11
+network$FlowerAbundancePerPlantSpecies[network$X == 1794] <- 10
+network$FlowerVisitorSpecies[network$X == 729] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 829] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 839] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 905] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 922] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 925] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 934] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 1881] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies[network$X == 2298] <- "Bombus.lucorum(agg)"
+network$FlowerVisitorSpecies <- gsub(" ", ",", network$FlowerVisitorSpecies)
+
+network$FlowerVisitorSpecies <- as.factor(network$FlowerVisitorSpecies)
+levels(network$FlowerVisitorSpecies)
+
+
+#creating dataframe with site ids and names for reference
+network %>%
+  select(Site_Name, Site_ID)  %>%
+  arrange(Site_ID)  %>%
+  unique() -> Names
+
+#taking out networks from each site (aggregated by month)
+netlist <- frame2webs(network, varnames = c("PlantSpecies",
+                                            "FlowerVisitorSpecies",
+                                            "Site_ID",
+                                            "VisitationFrequency"),
+                      type.out = "list", emptylist = TRUE)
+
+
+#creates I graph objects from the netlist dataframes
+networks <- prepare_networks(netlist, directed = FALSE)
+
+names <- name_networks(as.character(Names$Site_Name)) 
+
+# plant community
+network %>%
+  select(Site_ID, PlantSpecies, FlowerAbundancePerPlantSpecies) %>%
+  mutate(Group = 1) %>%
+   frame2webs(varnames = c("Site_ID",
+                                            "PlantSpecies",
+                                            "Group",
+                                            "FlowerAbundancePerPlantSpecies"),
+                      type.out = "array",
+                      emptylist = TRUE) -> plant_community
+plant_community <- as.data.frame(plant_community)
+colnames(plant_community) <- gsub(".1", "", colnames(plant_community))
+#setting the apis at site three to correct abundance
+plant_community$Hebe.agg[11] <- 0
+plant_community$Oxalis.debilis[11] <- 0
+plant_community$Vicia.sepium[18] <- 4
+#write.csv(plant_community, "Plant_Community.csv")
+
+# pollinator community
+network %>%
+  select(Site_ID, FlowerVisitorSpecies, VisitationFrequency) %>%
+  mutate(Group = 1) %>%
+   frame2webs(varnames = c("Site_ID",
+                                            "FlowerVisitorSpecies",
+                                            "Group",
+                                            "VisitationFrequency"),
+                      type.out = "array",
+                      emptylist = TRUE) -> pollinator_community
+pollinator_community <- as.data.frame(pollinator_community)
+colnames(pollinator_community) <- gsub(".1", "", colnames(pollinator_community))
+#setting the apis at site three to correct abundance
+pollinator_community$Apis.mellifera[3] <- 9
+#setting the diptera at site three to correct abundance
+pollinator_community$Diptera[7]  <- 47
+#setting the meadow brown at site 8 to correct abundance
+pollinator_community$Meadow.brown[8] <- 1
+#setting the bombus luc agg at site 11 to correct abundance
+pollinator_community$`Bombus.lucorum(agg)`[11] <- 18
+#setting the bombus pratorum at site 11 to correct abundance
+pollinator_community$Bombus.pratorum[11] <- 5
+#setting the bombus pratorum at site 11 to correct abundance
+pollinator_community$Bombus.pratorum[11] <- 5
+
+#write.csv(pollinator_community, "Pollinator_Community.csv")
+
+```
+
+
+Environmental Data
+```{r echo=FALSE, message=FALSE, results='hide'}
+
+dist_to_frame <- function(inDist) {
+  if (class(inDist) != "dist") stop("wrong input type")
+  A <- attr(inDist, "Size")
+  B <- if (is.null(attr(inDist, "Labels"))) sequence(A) else attr(inDist, "Labels")
+  if (isTRUE(attr(inDist, "Diag"))) attr(inDist, "Diag") <- FALSE
+  if (isTRUE(attr(inDist, "Upper"))) attr(inDist, "Upper") <- FALSE
+  data.frame(
+    row = B[unlist(lapply(sequence(A)[-1], function(x) x:A))],
+    col = rep(B[-length(B)], (length(B)-1):1),
+    value = as.vector(inDist))
+}
+
+#creating distances including semi natural sites
+Sites <- read.csv("Sites.csv")
+Sites$AgIndex <- Sites$AgIndex*10
+
+Spatial <- Sites %>% 
+  select(X, Y) %>% 
+  mutate(X_KM = (X - 680000)/1000, Y_KM = (Y - 720000)/1000) %>% 
+  select(X_KM, Y_KM)
+Spat.dist <- dist(Spatial)
+
+## Creating distance dataframe
+spatial <-  dist_to_frame(Spat.dist)
+names(spatial) <- c("row", "col", "dist")
+
+Index <- Sites %>% 
+  select(Impervious, AgIndex)
+Ind.dist <- dist(Index)
+
+### Gradient distance dataset
+gradient <-  dist_to_frame(Ind.dist)
+names(gradient) <- c("row", "col", "grad")
+
+# combining environmental datasets
+vars <- full_join(gradient, spatial)
+
+
+###Crearting environemantal and spatial distances including only agri and urban sites
+
+#creating spatial and environmental gradients
+Sites <- read.csv("Sites.csv")
+Sites$AgIndex <- Sites$AgIndex*10
+
+Land_sites <- Sites[-c(10,11,12),]
+
+#spatial distance
+Land_Spatial <- Land_sites %>% 
+  select(X, Y) %>% 
+  mutate(X_KM = (X - 680000)/1000, Y_KM = (Y - 720000)/1000) %>% 
+  select(X_KM, Y_KM)
+rownames(Land_Spatial)[10:18] <- c("13","14", "15", "16","17", "18", "19","20","21")
+land.spat.dist <- dist(Land_Spatial)
+
+## Creating distance dataframe
+Land.spatial <-  dist_to_frame(land.spat.dist)
+names(Land.spatial) <- c("row", "col", "dist")
+
+## creating urban and agri gradients
+#environmental distance
+Land.Index <- Land_sites %>% 
+  select(Impervious, AgIndex)
+Land.Ind.dist <- dist(Land.Index)
+
+### Gradient distance dataset
+Land.gradient <-  dist_to_frame(Land.Ind.dist)
+names(Land.gradient) <- c("row", "col", "grad")
+
+
+#creating urban environmental and spatial distances
+UrbanSpatial <- Sites[1:9,] %>% 
+  select(X, Y) %>% 
+  mutate(X_KM = (X - 680000)/1000, Y_KM = (Y - 720000)/1000) %>% 
+  select(X_KM, Y_KM)
+Urban.Spat.dist <- dist(UrbanSpatial)
+
+## Creating distance dataframe
+Urban.spatial <-  dist_to_frame(Urban.Spat.dist)
+names(Urban.spatial) <- c("row", "col", "dist")
+
+Urban.spatial$col <- as.numeric(as.character(Urban.spatial$col))
+Urban.spatial$row <- as.numeric(as.character(Urban.spatial$row))
+
+
+Urban.Index <- Sites[1:9,] %>% 
+  select(Impervious, AgIndex)
+Urban.Ind.dist <- dist(Urban.Index)
+
+### Gradient distance dataset
+urban.gradient <-  dist_to_frame(Urban.Ind.dist)
+names(urban.gradient) <- c("row", "col", "grad")
+
+urban.gradient$col <- as.numeric(urban.gradient$col)
+urban.gradient$row <- as.numeric(as.character(urban.gradient$row))
+
+# combining environmental datasets
+urban.vars <- full_join(urban.gradient, Urban.spatial)
+
+
+#creating agri environmental and spatial distances
+AgriSpatial <- Sites[13:21,] %>% 
+  select(X, Y) %>% 
+  mutate(X_KM = (X - 680000)/1000, Y_KM = (Y - 720000)/1000) %>% 
+  select(X_KM, Y_KM)
+row.names(AgriSpatial) <- c(13:21)
+Agri.Spat.dist <- dist(AgriSpatial)
+
+## Creating distance dataframe
+Agri.spatial <-  dist_to_frame(Agri.Spat.dist)
+names(Agri.spatial) <- c("row", "col", "dist")
+
+Agri.spatial$col <- as.numeric(as.character(Agri.spatial$col))
+Agri.spatial$row <- as.numeric(as.character(Agri.spatial$row))
+
+Agri.Index <- Sites[13:21,] %>% 
+  select(Impervious, AgIndex)
+Agri.Ind.dist <- dist(Agri.Index)
+
+### Gradient distance dataset
+agri.gradient <-  dist_to_frame(Agri.Ind.dist)
+names(agri.gradient) <- c("row", "col", "grad")
+
+agri.gradient$col <- as.numeric(as.character(agri.gradient$col))
+agri.gradient$row <- as.numeric(as.character(agri.gradient$row))
+
+# combining environmental datasets
+agri.vars <- full_join(agri.gradient, Agri.spatial)
+```
+
+
+
+Modifying Plant Names, adding in Plant Family and whether the species is Native or Introduced
+```{r}
+network$PlantSpecies <- as.factor(network$PlantSpecies)
+
+levels(as.factor(network$PlantSpecies))
+
+network$PlantSpecies <- as.character(network$PlantSpecies)
+
+network$Introduced.[network$PlantSpecies == "Achillea.millefolium"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Achillea.millefolium"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Aconitum.napellus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Aconitum.napellus"] <- "Ranunculaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Aegopodium.padagraria"] <- "Aegopodium.podagraria"
+network$Introduced.[network$PlantSpecies == "Aegopodium.podagraria"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Aconitum.napellus"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Agapanthus.sp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Aconitum.napellus"] <- "Amaryllidaceae"
+
+network$Introduced.[network$PlantSpecies == "Ajuga.reptans"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ajuga.reptans"] <- "Lamiaceae"
+
+network$Introduced.[network$PlantSpecies == "Alcea.rosea"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Alcea.rosea"] <- "Malvaceae"
+                   
+network$Introduced.[network$PlantSpecies == "Alliaria.petiolata"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Alliaria.petiolata"] <- "Brassicaceae" 
+
+network$Introduced.[network$PlantSpecies == "Allium.schoenoprasum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Allium.schoenoprasum"] <- "Amaryllidaceae"  
+                    
+network$Introduced.[network$PlantSpecies == "Allium.triquetrum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Allium.triquetrum"] <- "Amaryllidaceae"  
+
+network$Introduced.[network$PlantSpecies == "Alstroemeria.spp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Alstroemeria.spp"] <- "Alstroemeriaceae"  
+        
+network$Introduced.[network$PlantSpecies == "Anthriscus.sylvestris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Anthriscus.sylvestris"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Anthyllis.vulneraria"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Anthyllis.vulneraria"] <- "Fabaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Antirrhinum.agg"] <- "Antirrhinum.majus"
+network$Introduced.[network$PlantSpecies == "Antirrhinum.majus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Antirrhinum.majus"] <- "Plantaginaceae"
+
+network$Introduced.[network$PlantSpecies == "Astrantia.major"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Astrantia.major"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Aubrieta.deltoidea"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Aubrieta.deltoidea"] <- "Brassicaceae" 
+
+network$Introduced.[network$PlantSpecies == "Barbarea.vulgaris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Barbarea.vulgaris"] <- "Brassicaceae" 
+
+network$Introduced.[network$PlantSpecies == "Begonia.semperflorens"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Begonia.semperflorens"] <- "Begoniaceae" 
+                
+network$Introduced.[network$PlantSpecies == "Bellis.perennis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Bellis.perennis"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Berberis.darwinii"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Berberis.darwinii"] <- "Berberidaceae"
+
+network$Introduced.[network$PlantSpecies == "Berberis.sp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Berberis.sp"] <- "Berberidaceae" 
+                  
+network$Introduced.[network$PlantSpecies == "Blue.Flower"] <- NA
+network$Plant_Family[network$PlantSpecies == "Blue.Flower"] <- NA     
+
+network$Introduced.[network$PlantSpecies == "Brassica.rapa"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Brassica.rapa"] <- "Brassicaceae"  
+
+network$Introduced.[network$PlantSpecies == "Buddleja.davidii"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Buddleja.davidii"] <- "Scrophulariaceae"    
+
+network$Introduced.[network$PlantSpecies == "Buddleja.globosa"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Buddleja.globosa"] <- "Scrophulariaceae"
+
+network$Introduced.[network$PlantSpecies == "Bunias.orientalis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Bunias.orientalis"] <- "Brassicaceae"
+
+network$Introduced.[network$PlantSpecies == "Buxus.sempervirens"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Buxus.sempervirens"] <- "Buxaceae" 
+
+network$Introduced.[network$PlantSpecies == "Calibrachoa.parviflora"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Calibrachoa.parviflora"] <- "Solanaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Calysteiga.sepium"] <- "Calystegia.sepium"
+network$Introduced.[network$PlantSpecies == "Calystegia.sepium"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Calystegia.sepium"] <- "Solanaceae"
+
+network$Introduced.[network$PlantSpecies == "Campanula.portenschlagia"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Campanula.portenschlagia"] <- "Campanulaceae"
+
+network$Introduced.[network$PlantSpecies == "Campanula.rotundifolia"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Campanula.rotundifolia"] <- "Campanulaceae"
+
+network$Introduced.[network$PlantSpecies == "Capsella.bursa-pastoris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Capsella.bursa-pastoris"] <- "Brassicaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Cardamine.hirsutum"] <- "Cardamine.hirsuta"
+network$Introduced.[network$PlantSpecies == "Cardamine.hirsuta"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cardamine.hirsuta"] <- "Brassicaceae"
+
+network$Introduced.[network$PlantSpecies == "Cardamine.pratensis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cardamine.pratensis"] <- "Brassicaceae"
+
+network$Introduced.[network$PlantSpecies == "Ceanothus.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Ceanothus.agg"] <- "Rhamnaceae"
+
+network$Introduced.[network$PlantSpecies == "Centaurea.cyanus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Centaurea.cyanus"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Centaurea.nigra"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Centaurea.nigra"] <- "Asteraceae"
+           
+network$Introduced.[network$PlantSpecies == "Centranthus.ruber"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Centranthus.ruber"] <- "Caprifoliaceae"
+
+network$Introduced.[network$PlantSpecies == "Cerastium.fontanum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cerastium.fontanum"] <- "Caryophyllaceae"  
+
+network$Introduced.[network$PlantSpecies == "Cerastium.tomentosum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cerastium.tomentosum"] <- "Caryophyllaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Chamerion.anguistifolium"] <- "Chamaenerion.angustifolium"
+network$Introduced.[network$PlantSpecies == "Chamaenerion.angustifolium"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Chamaenerion.angustifolium"] <- "Onagraceae"
+                     
+network$Introduced.[network$PlantSpecies == "Chenopodium.album"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Chenopodium.album"] <- "Amaranthaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Chrysanthemum.segtum"] <- "Chrysanthemum.segetum"
+network$Introduced.[network$PlantSpecies == "Chrysanthemum.segetum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Chrysanthemum.segetum"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Circaea.lutetiana"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Circaea.lutetiana"] <- "Onagraceae"
+
+network$Introduced.[network$PlantSpecies == "Cirsium.arvense"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cirsium.arvense"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Cirsium.palustre"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cirsium.palustre"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Cirsium.vulgare"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cirsium.vulgare"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Cistus.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cistus.agg"] <- "Cistaceae"     
+
+network$Introduced.[network$PlantSpecies == "Conopodium.majus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Conopodium.majus"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Cornus.alba(Crimsam)"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cornus.alba(Crimsam)"] <- "Cornaceae" 
+                   
+network$Introduced.[network$PlantSpecies == "Cotoneaster.franchetii"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cotoneaster.franchetii"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Cotoneaster.frigidus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cotoneaster.frigidus"] <- "Rosaceae"   
+
+network$Introduced.[network$PlantSpecies == "Cotoneaster.hybridus.pendulus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Cotoneaster.hybridus.pendulus"] <- "Rosaceae"   
+                    
+network$Introduced.[network$PlantSpecies == "Crataegus.monogyna"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Crataegus.monogyna"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Crepis.biennis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Crepis.biennis"] <- "Asteraceae"  
+        
+network$Introduced.[network$PlantSpecies == "Crepis.capillaris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Crepis.capillaris"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Crocosmia.xcrocosmiiflora"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Crocosmia.xcrocosmiiflora"] <- "Iridaceae"
+
+network$Introduced.[network$PlantSpecies == "Cytisus.scoparius"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Cytisus.scoparius"] <- "Fabaceae" 
+
+network$Introduced.[network$PlantSpecies == "Daucus.carota"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Daucus.carota"] <- "Apiaceae" 
+
+network$Introduced.[network$PlantSpecies == "Dianthus.caryophyllus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Dianthus.caryophyllus"] <- "Caryophyllaceae" 
+
+network$Introduced.[network$PlantSpecies == "Digitalis.purpurea"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Digitalis.purpurea"] <- "Plantaginaceae" 
+
+network$Introduced.[network$PlantSpecies == "Dimorphotheca.ecklonis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Dimorphotheca.ecklonis"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Diplotaxis.tenuifolia"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Diplotaxis.tenuifolia"] <- "Brassicaceae"
+
+network$Introduced.[network$PlantSpecies == "Epilobium.hirsutum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Epilobium.hirsutum"] <- "Onagraceae"
+
+network$Introduced.[network$PlantSpecies == "Epilobium.montanum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Epilobium.montanum"] <- "Onagraceae" 
+
+network$Introduced.[network$PlantSpecies == "Epilobium.parviflorum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Epilobium.parviflorum"] <- "Onagraceae" 
+
+network$Introduced.[network$PlantSpecies == "Erica.spp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Erica.spp"] <- "Ericaceae"
+
+network$Introduced.[network$PlantSpecies == "Erigeron.glaucus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Erigeron.glaucus"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Erysimum.spp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Erysimum.spp"] <- "Brassicaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Escallonia.macrantha"] <- "Escallonia.rubra.var.macrantha"
+network$Introduced.[network$PlantSpecies == "Escallonia.rubra.var.macrantha"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Escallonia.rubra.var.macrantha"] <- "Escalloniaceae" 
+
+network$Introduced.[network$PlantSpecies == "Fallopia.baldschuanica"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Fallopia.baldschuanica"] <- "Polygonaceae"
+
+network$Introduced.[network$PlantSpecies == "Ficaria.verna"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ficaria.verna"] <- "Ranunculaceae"
+
+network$Introduced.[network$PlantSpecies == "Filipendula.ulmaria"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Filipendula.ulmaria"] <- "Rosaceae" 
+               
+network$Introduced.[network$PlantSpecies == "Fuchsia.(cult)"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Fuchsia.(cult)"] <- "Onagraceae"
+
+network$Introduced.[network$PlantSpecies == "Fuchsia.magellanica"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Fuchsia.magellanica"] <- "Onagraceae"
+
+network$PlantSpecies[network$PlantSpecies == "Fumaria.officianalis"] <- "Fumaria.officinalis"
+network$Introduced.[network$PlantSpecies == "Fumaria.officinalis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Fumaria.officinalis"] <- "Papaveraceae"
+
+network$Introduced.[network$PlantSpecies == "Geranium.(cult)"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Geranium.(cult)"] <- "Geraniaceae"
+
+network$Introduced.[network$PlantSpecies == "Geranium.pratense"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Geranium.pratense"] <- "Geraniaceae" 
+
+network$Introduced.[network$PlantSpecies == "Geranium.pyrenaicum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Geranium.pyrenaicum"] <- "Geraniaceae"
+
+network$Introduced.[network$PlantSpecies == "Geranium.robertianum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Geranium.robertianum"] <- "Geraniaceae"
+
+network$Introduced.[network$PlantSpecies == "Geranium.versicolor"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Geranium.versicolor"] <- "Geraniaceae"  
+                      
+network$Introduced.[network$PlantSpecies == "Grass"] <- NA
+network$Plant_Family[network$PlantSpecies == "Grass"] <- NA                   
+               
+network$Introduced.[network$PlantSpecies == "Hebe.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Hebe.agg"] <- "Plantaginaceae" 
+
+network$Introduced.[network$PlantSpecies == "Helichrysum.italicum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Helichrysum.italicum"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Heracleum.sphondylium"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Heracleum.sphondylium"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Heuchera.cult"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Heuchera.cult"] <- "Saxifragaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Hycainthoides.non-scripta"] <- "Hyacinthoides.non-scripta"
+network$Introduced.[network$PlantSpecies == "Hyacinthoides.non-scripta"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Hyacinthoides.non-scripta"] <- "Asparagaceae" 
+
+network$Introduced.[network$PlantSpecies == "Hydrangea.cult"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Hydrangea.cult"] <- "Hydrangeaceae"
+         
+network$Introduced.[network$PlantSpecies == "Hypericum.androsaemum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Hypericum.androsaemum"] <- "Hypericaceae"
+
+network$Introduced.[network$PlantSpecies == "Hypericum.perforatum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Hypericum.perforatum"] <- "Hypericaceae"
+
+network$Introduced.[network$PlantSpecies == "Hypochaeris.radicata"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Hypochaeris.radicata"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Iris.pseudacorus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Iris.pseudacorus"] <- "Iridaceae"
+
+network$Introduced.[network$PlantSpecies == "Knautia.arvensis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Knautia.arvensis"] <- "Caprifoliaceae"
+
+network$Introduced.[network$PlantSpecies == "Laburnum.xwatereri"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Laburnum.xwatereri"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Lamium.purpureum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Lamium.purpureum"] <- "Lamiaceae"
+
+network$Introduced.[network$PlantSpecies == "Lapsana.communis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Lapsana.communis"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Lathyrus.odoratus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Lathyrus.odoratus"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Lathyrus.pratensis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Lathyrus.pratensis"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Lavandula.angustifolia"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Lavandula.angustifolia"] <- "Lamiaceae"
+
+network$Introduced.[network$PlantSpecies == "Leontodon.autumnalis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Leontodon.autumnalis"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Leontodon.hispidus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Leontodon.hispidus"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Leontodon.saxatilis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Leontodon.saxatilis"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Leucanthemum.vulgare"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Leucanthemum.vulgare"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Leucanthemum.xsuperbum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Leucanthemum.xsuperbum"] <- "Asteraceae"
+
+network$Introduced.[network$PlantSpecies == "Ligustrum.vulgare"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ligustrum.vulgare"] <- "Oleaceae"
+
+network$Introduced.[network$PlantSpecies == "Linaria.purpurea"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Linaria.purpurea"] <- "Plantaginaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Linum.usitatissimum"] <- "Linum.bienne"
+network$Introduced.[network$PlantSpecies == "Linum.bienne"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Linum.bienne"] <- "Linaceae"
+
+network$Introduced.[network$PlantSpecies == "Lonicera.nitida"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Lonicera.nitida"] <- "Caprifoliaceae"
+
+network$Introduced.[network$PlantSpecies == "Lonicera.periclymenum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Lonicera.periclymenum"] <- "Caprifoliaceae"
+
+network$Introduced.[network$PlantSpecies == "Lotus.corniculatus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Lotus.corniculatus"] <- "Fabaceae"
+
+network$PlantSpecies[network$PlantSpecies == "Malus.prunifolia"] <- "Malus.sylvestris"
+network$Introduced.[network$PlantSpecies == "Malus.sylvestris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Malus.sylvestris"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Malus.pumila"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Malus.pumila"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Malva.arborea"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Malva.arborea"] <- "Malvaceae"
+
+network$Introduced.[network$PlantSpecies == "Malva.sylvestris"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Malva.sylvestris"] <- "Malvaceae"
+            
+network$Introduced.[network$PlantSpecies == "Mentha.×piperita"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Mentha.×piperita"] <- "Lamiaceae"    
+
+network$Introduced.[network$PlantSpecies == "Nepeta.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Nepeta.agg"] <- "Lamiaceae"
+
+network$Introduced.[network$PlantSpecies == "Odontites.vernus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Odontites.vernus"] <- "Orobanchaceae"
+
+network$Introduced.[network$PlantSpecies == "Oxalis.debilis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Oxalis.debilis"] <- "Oxalidaceae"
+
+network$Introduced.[network$PlantSpecies == "Papaver.somniferum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Papaver.somniferum"] <- "Papaveraceae"
+
+network$Introduced.[network$PlantSpecies == "Pelargonium.cult"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Pelargonium.cult"] <- "Geraniaceae"
+
+network$Introduced.[network$PlantSpecies == "Penstemon.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Penstemon.agg"] <- "Plantaginaceae"  
+                   
+network$Introduced.[network$PlantSpecies == "Pentaglottis.sempervirens"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Pentaglottis.sempervirens"] <- "Boraginaceae"  
+
+network$Introduced.[network$PlantSpecies == "Persicaria.maculosa"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Persicaria.maculosa"] <- "Polygonaceae"
+
+network$Introduced.[network$PlantSpecies == "Petunia.xatkinsiana"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Petunia.xatkinsiana"] <- "Solanaceae"
+
+network$Introduced.[network$PlantSpecies == "Pink Aster"] <- NA
+network$Plant_Family[network$PlantSpecies == "Pink Aster"] <- "Asteraceae"  
+
+network$Introduced.[network$PlantSpecies == "Pink.Flower"] <- NA
+network$Plant_Family[network$PlantSpecies == "Pink.Flower"] <- NA  
+
+network$Introduced.[network$PlantSpecies == "Plantago.lanceolata"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Plantago.lanceolata"] <- "Plantaginaceae"  
+                           
+network$Introduced.[network$PlantSpecies == "Potentilla.erecta"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Potentilla.erecta"] <- "Rosaceae"  
+
+network$Introduced.[network$PlantSpecies == "Potentilla.reptans"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Potentilla.reptans"] <- "Rosaceae"  
+                            
+network$Introduced.[network$PlantSpecies == "Primula.veris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Primula.veris"] <- "Primulaceae" 
+
+network$Introduced.[network$PlantSpecies == "Prunus.spinosa"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Prunus.spinosa"] <- "Rosaceae" 
+
+network$Introduced.[network$PlantSpecies == "Purple.Flower.Hemp"] <- NA
+network$Plant_Family[network$PlantSpecies == "Purple.Flower.Hemp"] <- NA
+
+network$Introduced.[network$PlantSpecies == "Purple.Tongue.Flower"] <- NA
+network$Plant_Family[network$PlantSpecies == "Purple.Tongue.Flower"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "Pyracantha.spp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Pyracantha.spp"] <- "Rosaceae"                
+
+network$Introduced.[network$PlantSpecies == "Ranunculus.acris"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ranunculus.acris"] <- "Ranunculaceae" 
+
+network$Introduced.[network$PlantSpecies == "Ranunculus.repens"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ranunculus.repens"] <- "Ranunculaceae"
+
+network$Introduced.[network$PlantSpecies == "RED FLOWER"] <- NA
+network$Plant_Family[network$PlantSpecies == "RED FLOWER"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "Reseda.luteola"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Reseda.luteola"] <- "Resedaceae"
+
+network$Introduced.[network$PlantSpecies == "Rhinanthus.minor"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Rhinanthus.minor"] <- "Orobanchaceae"
+
+network$Introduced.[network$PlantSpecies == "Rhododendron.davidii"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Rhododendron.davidii"] <- "Ericaceae"
+
+network$Introduced.[network$PlantSpecies == "Rhus.typhina.sp"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Rhus.typhina.sp"] <- "Anacardiaceae"
+
+network$Introduced.[network$PlantSpecies == "Ribes.sanguineum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Ribes.sanguineum"] <- "Grossulariaceae"
+
+network$Introduced.[network$PlantSpecies == "Rorippa.nasturtium-aquaticum"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Rorippa.nasturtium-aquaticum"] <- "	Brassicaceae"
+
+network$Introduced.[network$PlantSpecies == "Rosa.canina"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Rosa.canina"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Rosa.cult"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Rosa.cult"] <- "Rosaceae"                         
+
+network$Introduced.[network$PlantSpecies == "Rosa.rubignosa"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Rosa.rubignosa"] <- "Rosaceae"       
+
+network$Introduced.[network$PlantSpecies == "Rosa.cult"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Rosa.cult"] <- "Rosaceae"  
+
+network$Introduced.[network$PlantSpecies == "Rosmarinus.officinalis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Rosmarinus.officinalis"] <- "Lamiaceae" 
+
+network$Introduced.[network$PlantSpecies == "Rubus.fruticosus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Rubus.fruticosus"] <- "Rosaceae" 
+
+network$Introduced.[network$PlantSpecies == "Sallix.spp"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Sallix.spp"] <- "Salicaceae" 
+
+network$Introduced.[network$PlantSpecies == "Salvia.microphylla"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Salvia.microphylla"] <- "Lamiaceae"
+
+network$Introduced.[network$PlantSpecies == "Salvia.officinalis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Salvia.officinalis"] <- "Lamiaceae" 
+
+network$Introduced.[network$PlantSpecies == "Scabiosa.columbaria"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Scabiosa.columbaria"] <- "Caprifoliaceae" 
+
+network$Introduced.[network$PlantSpecies == "Scrophularia.auriculata"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Scrophularia.auriculata"] <- "Scrophulariaceae" 
+
+network$Introduced.[network$PlantSpecies == "Sedum.agg"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Sedum.agg"] <- "Crassulaceae" 
+
+network$PlantSpecies[network$PlantSpecies == "Senecio.greyii"] <- "Brachyglottis.greyi"
+network$Introduced.[network$PlantSpecies == "Brachyglottis.greyi"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Brachyglottis.greyi"] <- "Asteraceae" 
+               
+network$Introduced.[network$PlantSpecies == "Senecio.jacobaea"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Senecio.jacobaea"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Silene.dioica"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Silene.dioica"] <- "Caryophyllaceae" 
+
+network$Introduced.[network$PlantSpecies == "Silene.dioica"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Silene.dioica"] <- "Caryophyllaceae" 
+
+network$Introduced.[network$PlantSpecies == "Sinapsis.arvensis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Sinapsis.arvensis"] <- "Brassicaceae" 
+
+network$Introduced.[network$PlantSpecies == "Smyrnium.olusatrum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Smyrnium.olusatrum"] <- "Apiaceae"
+
+network$Introduced.[network$PlantSpecies == "Solanum.tuberosum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Solanum.tuberosum"] <- "Solanaceae" 
+                                    
+network$Introduced.[network$PlantSpecies == "Sonchus.arvensis"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Sonchus.arvensis"] <- "Asteraceae" 
+                                    
+network$Introduced.[network$PlantSpecies == "Sonchus.asper"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Sonchus.asper"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Spikey white and pink flowered bush"] <- NA
+network$Plant_Family[network$PlantSpecies == "Spikey white and pink flowered bush"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "Spiraea.japonica"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Spiraea.japonica"] <- "Rosaceae"
+
+network$Introduced.[network$PlantSpecies == "Spiraea.xarguta"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Spiraea.xarguta"] <- "Rosaceae" 
+
+network$Introduced.[network$PlantSpecies == "Spiraea.xbillardii"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Spiraea.xbillardii"] <- "Rosaceae" 
+
+network$Introduced.[network$PlantSpecies == "Stachys.byzantina"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Stachys.byzantina"] <- "Lamiaceae" 
+
+network$Introduced.[network$PlantSpecies == "Stellaria.graminea"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Stellaria.graminea"] <- "Caryophyllaceae" 
+
+network$Introduced.[network$PlantSpecies == "Stellaria.media"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Stellaria.media"] <- "Caryophyllaceae"                      
+                   
+network$Introduced.[network$PlantSpecies == "Symphoricarpos.albus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Symphoricarpos.albus"] <- "Caprifoliaceae"                      
+
+network$Introduced.[network$PlantSpecies == "Symphytum.×uplandicum"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Symphytum.×uplandicum"] <- "Boraginaceae"                      
+     
+network$Introduced.[network$PlantSpecies == "Tagetes.patula"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Tagetes.patula"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Tanacetum.parthenium"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Tanacetum.parthenium"] <- "Asteraceae" 
+               
+network$Introduced.[network$PlantSpecies == "Tanacetum.vulgare"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Tanacetum.vulgare"] <- "Asteraceae" 
+
+network$Introduced.[network$PlantSpecies == "Taraxacum.agg"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Taraxacum.agg"] <- "Asteraceae" 
+
+network$PlantSpecies[network$PlantSpecies == "Tillia.xeuropaea"] <- "Tilia.xeuropaea"
+network$Introduced.[network$PlantSpecies == "Tilia.xeuropaea"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Tilia.xeuropaea"] <- "Malvaceae"
+
+network$Introduced.[network$PlantSpecies == "Trachelospermum.jasminoides"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Trachelospermum.jasminoides"] <- "Apocynaceae"
+               
+network$Introduced.[network$PlantSpecies == "Trifolium.pratense"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Trifolium.pratense"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Trifolium.repens"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Trifolium.repens"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Ulex.europaeus"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Ulex.europaeus"] <- "Fabaceae"
+
+network$Introduced.[network$PlantSpecies == "Verbena.bonariensis"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Verbena.bonariensis"] <- "Verbenaceae"
+
+network$Introduced.[network$PlantSpecies == "Veronica.chamaedrys"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Veronica.chamaedrys"] <- "Plantaginaceae"
+
+network$Introduced.[network$PlantSpecies == "Veronica.persica"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Veronica.persica"] <- "Plantaginaceae"
+         
+network$Introduced.[network$PlantSpecies == "Viburnum.tinus"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Viburnum.tinus"] <- "Adoxaceae"                   
+
+network$Introduced.[network$PlantSpecies == "Vicia.sativa"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Vicia.sativa"] <- "Fabaceae"             
+
+network$Introduced.[network$PlantSpecies == "Vicia.sepium"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Vicia.sepium"] <- "Fabaceae"     
+
+network$Introduced.[network$PlantSpecies == "Viola.odorata"] <- "N"
+network$Plant_Family[network$PlantSpecies == "Viola.odorata"] <- "Violaceae" 
+
+network$Introduced.[network$PlantSpecies == "Weigela.kosteriana.variegata"] <- "I"
+network$Plant_Family[network$PlantSpecies == "Weigela.kosteriana.variegata"] <- "Caprifoliaceae" 
+
+network$Introduced.[network$PlantSpecies == "White flower grey leaves"] <- NA
+network$Plant_Family[network$PlantSpecies == "White flower grey leaves"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "White.Flower"] <- NA
+network$Plant_Family[network$PlantSpecies == "White.Flower"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "White thorn like flower bus no spikes"] <- NA
+network$Plant_Family[network$PlantSpecies == "White thorn like flower bus no spikes"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "White.Tree.Flower"] <- NA
+network$Plant_Family[network$PlantSpecies == "White.Tree.Flower"] <- NA 
+
+network$Introduced.[network$PlantSpecies == "Yellow.Aster"] <- NA
+network$Plant_Family[network$PlantSpecies == "Yellow.Aster"] <- NA 
+
+
+levels(as.factor(network$Introduced.))
+levels(as.factor(network$Plant_Family))
+network$PlantSpecies <- as.factor(network$PlantSpecies)
+
+```
+
+
+Creating the Dataset
+```{r}
+#function to create shared networks between two sites i-j and j-i
+shared_net <- function (n1, n2, net1, net2) {
+  v1 <- igraph::V(n1)$name
+  v2 <- igraph::V(n2)$name
+  vs <- v1[v1 %in% v2]
+    
+  plants_n1 <- igraph::V(n1)$name[1:dim(net1)[1]]
+  plants_n2 <- igraph::V(n2)$name[1:dim(net2)[1]]
+  plants_shared <- plants_n1[plants_n1 %in% plants_n2]
+
+      
+  pols_n1 <- igraph::V(n1)$name[(dim(net1)[1]+1):length(v1)] 
+  pols_n2 <- igraph::V(n2)$name[(dim(net2)[1]+1):length(v2)] 
+  pols_shared <- pols_n1[pols_n1 %in% pols_n2]
+  
+  shared_neti_j <- net1[plants_shared, pols_shared]
+  shared_netj_i <- net2[plants_shared, pols_shared]
+  
+  return(list(sn_i_j = shared_neti_j, sn_j_i = shared_netj_i))
+}
+
+#using the function
+#shared_net(I_nets[[i]], I_nets[[j]], bi_nets[[i]], bi_nets[[j]])
+
+
+
+#creating igraph object
+I_nets <- prepare_networks(netlist)
+bi_nets <- netlist
+
+
+
+#function to apply shared_net function to a list of networks returning all unique pairwise combinations of the networks in the list
+Shared_Net_Mod <- function (I_nets, bi_nets, complete = TRUE, ...) {
+  N <- name_networks(I_nets)
+  dat <- data.frame(i=I(vector(mode="numeric", length=2)),
+                  j=I(vector(mode="numeric", length=2)),
+                  m=I(vector(mode="list", length=2)))
+  Shared <- NULL 
+  stop_at <- ifelse(complete, length(I_nets), length(I_nets) - 1)
+  for (i in c(1:stop_at)) {
+    start_at <- ifelse(complete, 1, i + 1)
+    inner_stop <- length(I_nets)
+    inner_steps <- c(start_at:inner_stop)
+    inner_steps <- inner_steps[which(inner_steps != i)]
+    for (j in inner_steps) {
+      b <- shared_net(I_nets[[i]], I_nets[[j]], bi_nets[[i]], bi_nets[[j]])
+      b$i <- names(I_nets)[i]
+      b$j <- names(I_nets)[j]
+      dat$m[[1]] <- b$sn_i_j
+      dat$m[[2]] <- b$sn_j_i
+      dat$i[1] <- b$i
+      dat$i[2] <- b$j
+      dat$j[1] <- b$j
+      dat$j[2] <- b$i
+      Shared <- rbind(Shared, rbind(dat))
+    }
+  }
+
+Shared <-  dplyr::distinct(Shared, i, j, .keep_all = TRUE)
+Shared$i <- as.numeric(Shared$i)
+Shared$j <- as.numeric(Shared$j)
+return(Shared)
+}
+
+
+
+
+#using the function
+Shared_Nets <- Shared_Net_Mod(I_nets, bi_nets)
+
+#making unique pairings of pollinators and plants
+unique_pairings <- crossing(colnames(pollinator_community), colnames(plant_community))
+
+#creating meta web that counts the number of times two species interacted
+meta_net <- matrix(data = NA, nrow = length(colnames(plant_community)), ncol = length(colnames(pollinator_community)), dimnames = list(colnames(plant_community), colnames(pollinator_community)))
+
+
+for (i in seq_along(colnames(meta_net))){
+  for (j in seq_along(rownames(meta_net))){
+meta_net[j,i] <- sum(na.omit(network$VisitationFrequency[network$FlowerVisitorSpecies == colnames(meta_net)[i] & network$PlantSpecies == rownames(meta_net)[j]]))
+  }
+}
+
+#creating a meta web that counts the number of sites an interaction occurred at
+meta_count <- matrix(data = NA, nrow = length(colnames(plant_community)), ncol = length(colnames(pollinator_community)), dimnames = list(colnames(plant_community), colnames(pollinator_community)))
+
+
+for (i in seq_along(colnames(meta_count))){
+ for (j in seq_along(rownames(meta_count))){
+meta_count[j,i] <- length(unique(na.omit(network$Site_ID[network$FlowerVisitorSpecies == colnames(meta_count)[i] & network$PlantSpecies == rownames(meta_count)[j]])))
+  }
+}
+
+
+
+#creating a for loop to search through each network for a unique pairing and, if the pairing occurs in more than one network, extracts the number of times the unique interaction occurs in each of the shared networks
+pairing_data <- vector("list", 264)
+iter <- 1
+
+for(x in 1:dim(unique_pairings)[1]){
+  
+  pol <- unique_pairings[[x,1]]
+  pla <- unique_pairings[[x,2]]
+  
+  if(meta_count[pla, pol] > 1){
+
+bin <- NULL
+for(y in 1:420){
+    if(pla %in% rownames(Shared_Nets$m[[y]]) & pol %in% colnames(Shared_Nets$m[[y]])){
+      n <- data.frame(i = Shared_Nets$i[y], j = Shared_Nets$j[y] , int = Shared_Nets$m[y][[1]][pla,pol])
+      bin <- rbind(bin, n)
+          }
+      else(next)
+    }
+    pairing_data[[iter]]$data <- bin
+    pairing_data[[iter]]$pol <- pol
+    pairing_data[[iter]]$pla <- pla
+
+iter <- iter + 1
+  }
+  else(next)
+}
+
+
+#creating a dataframe detailing the number of sites a pollinator was found
+PA_pollinator_community <- pollinator_community
+PA_pollinator_community[PA_pollinator_community > 0] <- 1
+
+Nm_sites_per_pol <- colSums(PA_pollinator_community)
+
+#creating a dataframe detailing the number of sites a plant was found
+PA_plant_community <- plant_community
+PA_plant_community[PA_plant_community > 0] <- 1
+
+Nm_sites_per_pla <- colSums(PA_plant_community)
+
+
+#modify below loop to extract when the plant turns over over when the pollinator is present and vice versa.
+
+#creating a for loop to search through each network for a unique pairing and, if the pairing occurs in more than one network, extracts the number of times the unique interaction occurs in each of the shared networks
+
+
+shared_interactions <- vector("list", 253)
+iter <- 1
+for(x in 1:dim(unique_pairings)[1]){
+  
+  pol <- unique_pairings[[x,1]]
+  pla <- unique_pairings[[x,2]]
+  
+  if(meta_count[pla, pol] > 1){
+  bin <- NULL  
+for(y in 1:420){
+    if(pla %in% rownames(Shared_Nets$m[[y]]) & pol %in% colnames(Shared_Nets$m[[y]])){
+      n <- data.frame(i = Shared_Nets$i[[y]], j = Shared_Nets$j[[y]] , int = Shared_Nets$m[[y]][pla,pol])
+      bin <- rbind(bin, n)
+          }
+      else(next)
+}
+    shared_interactions[[iter]]$data <- bin
+    shared_interactions[[iter]]$pol <- pol
+    shared_interactions[[iter]]$pla <- pla
+
+iter <- iter + 1
+  }
+  else(next)
+}
+
+
+x <- 1
+
+unique_interations <- vector("list", 553)
+iter <- 1
+for(x in 1:dim(unique_pairings)[1]){
+  
+  pol <- unique_pairings[[x,1]]
+  pla <- unique_pairings[[x,2]]
+  
+  if(meta_count[pla, pol] == 1){
+    n <- unique(na.omit(network$Site_ID[network$FlowerVisitorSpecies == pol & network$PlantSpecies == pla]))
+    
+    unique_interations[[iter]]$site <- n
+    unique_interations[[iter]]$pol <- pol
+    unique_interations[[iter]]$pla <- pla
+    unique_interations[[iter]]$int <- meta_net[pla, pol]
+    
+
+iter <- iter + 1
+  }
+  else(next)
+}
+
+
+x<-1
+int_pair_occurrence_UI <- vector("list", 553)
+iter <- 1
+for(x in seq_len(length(unique_interations))){
+  
+  pol <- unique_interations[[x]]$pol
+  pla <- unique_interations[[x]]$pla
+  
+  int_pair_occurence <- cbind(PA_pollinator_community[,pol], PA_plant_community[,pla])
+
+info <- vector()
+for(i in 1:21){
+if(int_pair_occurence[i,1] == 0 & int_pair_occurence[i,2] == 1){info[i] <- "plant_present"}
+else if (int_pair_occurence[i,1] == 1 & int_pair_occurence[i,2] == 0){info[i] <- "pol_present"}
+else if (int_pair_occurence[i,1] == 1 & int_pair_occurence[i,2] == 1){info[i] <- "both_present"}
+else if (int_pair_occurence[i,1] == 0 & int_pair_occurence[i,2] == 0){info[i] <- "both_absent"}
+}
+
+int_pair_occurrence_UI[[iter]]$pol <- pol
+int_pair_occurrence_UI[[iter]]$pla <- pla
+int_pair_occurrence_UI[[iter]]$data <- info
+
+iter <- iter + 1
+}
+
+int_pair_occurrence_SI <- vector("list", 253)
+iter <- 1
+for(x in seq_len(length(shared_interactions))){
+  
+  pol <- shared_interactions[[x]]$pol
+  pla <- shared_interactions[[x]]$pla
+  
+  int_pair_occurence <- cbind(PA_pollinator_community[,pol], PA_plant_community[,pla])
+
+info <- vector()
+for(i in 1:21){
+if(int_pair_occurence[i,1] == 0 & int_pair_occurence[i,2] == 1){info[i] <- "plant_present"}
+else if (int_pair_occurence[i,1] == 1 & int_pair_occurence[i,2] == 0){info[i] <- "pol_present"}
+else if (int_pair_occurence[i,1] == 1 & int_pair_occurence[i,2] == 1){info[i] <- "both_present"}
+else if (int_pair_occurence[i,1] == 0 & int_pair_occurence[i,2] == 0){info[i] <- "both_absent"}
+}
+
+int_pair_occurrence_SI[[iter]]$pol <- pol
+int_pair_occurrence_SI[[iter]]$pla <- pla
+int_pair_occurrence_SI[[iter]]$data <- cbind(int_pair_occurence,info)
+
+iter <- iter + 1
+}
+
+
+####
+
+#creating a for loop to document when an interaction was conserved, turned over or was absent in a site pair
+
+i <- 1
+
+species_driven_turnover_SI <- data.frame()
+for (i in seq_along(1:253)){
+  
+  temp <- as.data.frame(matrix(nrow = 21, ncol = 4, dimnames = list(NULL, c("pol", "pla", "site", "status"))))
+
+  temp$pol <- int_pair_occurrence_SI[[i]]$pol
+  temp$pla <- int_pair_occurrence_SI[[i]]$pla
+  temp$site <- 1:21
+  temp$status <- int_pair_occurrence_SI[[i]]$data[,3]
+
+  species_driven_turnover_SI <- rbind(species_driven_turnover_SI, temp)
+  
+}
+
+
+species_driven_turnover_UI <- data.frame()
+for (i in seq_along(1:553)){
+  
+  temp <- as.data.frame(matrix(nrow = 21, ncol = 4, dimnames = list(NULL, c("pol", "pla", "site", "status"))))
+
+  temp$pol <- int_pair_occurrence_UI[[i]]$pol
+  temp$pla <- int_pair_occurrence_UI[[i]]$pla
+  temp$site <- 1:21
+  temp$status <- int_pair_occurrence_UI[[i]]$data
+
+  species_driven_turnover_UI <- rbind(species_driven_turnover_UI, temp)
+  
+}
+
+species_driven_turnover <- rbind(species_driven_turnover_UI, species_driven_turnover_SI)
+
+
+
+#creating a for loop to document when an interaction was conserved, turned over or was absent in a site pair
+i <- 1
+for (i in seq_along(1:253)){
+
+shared_interactions[[i]][["data"]]$turn <- 0
+pairs_sum <- rep(zoo::rollapply(shared_interactions[[i]][["data"]]$int, 2, sum, by=2), each=2)
+pairs_prod <- rep(zoo::rollapply(shared_interactions[[i]][["data"]]$int, 2, prod, by=2), each=2)
+pairs_div <- pairs_sum/pairs_prod
+pairs_div[is.nan(pairs_div)] <- 0
+
+
+for(y in seq_along(pairs_div)){
+  
+  site <- sort(c(shared_interactions[[i]][["data"]]$j[y], shared_interactions[[i]][["data"]]$i[y]))
+  shared_interactions[[i]][["data"]]$site_pair[y] <- paste0(site[1], "_", site[2])
+  
+  if(pairs_div[y] != Inf & pairs_div[y] > 0){
+    shared_interactions[[i]][["data"]]$turn[y] <- "C"
+  }
+  else if(pairs_div[y] == Inf){
+    shared_interactions[[i]][["data"]]$turn[y] <- "T"
+  }
+    else if(pairs_div[y] == 0){
+    shared_interactions[[i]][["data"]]$turn[y] <- "A"
+  }
+}
+}
+
+
+#extracting the average interaction frequency for each unique pairing that interacts in at least two sites
+avg_int_freq_shared <- data.frame(avg_int_freq = I(vector(mode="numeric", length=253)),
+                          pol = I(vector(mode="character", length=253)),
+                          pla = I(vector(mode="character", length=253)))
+
+for(i in seq_along(1:length(avg_int_freq_shared$avg_int_freq))){
+  avg_int_freq_shared$avg_int_freq[i] <- mean(shared_interactions[[i]][["data"]]$int)
+  avg_int_freq_shared$pol[i] <- shared_interactions[[i]]$pol
+  avg_int_freq_shared$pla[i] <- shared_interactions[[i]]$pla
+}
+
+
+avg_int_freq_unique <- data.frame(avg_int_freq = I(vector(mode="numeric", length=553)),
+                          pol = I(vector(mode="character", length=553)),
+                          pla = I(vector(mode="character", length=553)))
+
+for(i in seq_along(1:length(avg_int_freq_unique$avg_int_freq))){
+  avg_int_freq_unique$avg_int_freq[i] <- mean(unique_interations[[i]]$int)
+  avg_int_freq_unique$pol[i] <- unique_interations[[i]]$pol
+  avg_int_freq_unique$pla[i] <- unique_interations[[i]]$pla
+}
+
+i <- 1
+
+#filtering data to the sites where the unique pairing interaction happened or both weren't observed interacting
+
+shared_pairing_data <- vector("list", 253)
+for (i in seq_along(1:253)){
+shared_pairing_data[[i]][["data"]] <- dplyr::distinct(shared_interactions[[i]][["data"]], site_pair, turn, .keep_all = TRUE)
+shared_pairing_data[[i]][["data"]]$pol <- shared_interactions[[i]]$pol
+shared_pairing_data[[i]][["data"]]$pla <- shared_interactions[[i]]$pla
+}
+
+#creating a dataframe to carryout statistical modelling on.
+
+library(dplyr)
+spd <- lapply(shared_pairing_data, data.frame, stringsAsFactors = FALSE)
+spd <- bind_rows(spd)
+
+colnames(spd) <- c("site_i", "site_j", "int", "turn", "site_pair" ,"pol", "pla")
+
+i <- 1
+
+#adding avg interaction frequency to the dataset
+spd$avg_int_freq <- 0
+for(i in seq_along(1:dim(spd)[1])){
+  spd$avg_int_freq[i] <- avg_int_freq_shared$avg_int_freq[avg_int_freq_shared$pol == spd$pol[i] &
+                                                     avg_int_freq_shared$pla == spd$pla[i]]
+}
+
+#adding in the landscape pairing
+spd$landscape <- 0
+spd$landscape[spd$site_i <= 9 & spd$site_j <= 9] <- "Urb-Urb"
+spd$landscape[spd$site_i <= 9 & spd$site_j >= 13] <- "Urb-Ag"
+spd$landscape[spd$site_i >= 13 & spd$site_j <= 9] <- "Ag-Urb"
+spd$landscape[spd$site_i >= 13 & spd$site_j >= 13] <- "Ag-Ag"
+spd$landscape[spd$site_i >= 10  & spd$site_i <= 12 & spd$site_j >= 10 & spd$site_j <= 12] <- "SN-SN"
+spd$landscape[spd$site_i >= 10  & spd$site_i <= 12 & spd$site_j >= 13] <- "SN-Ag"
+spd$landscape[spd$site_i >= 10  & spd$site_i <= 12 & spd$site_j <= 9] <- "SN-Urb"
+spd$landscape[spd$site_i <= 9  & spd$site_j >= 10 & spd$site_j <= 12] <- "Urb-SN"
+spd$landscape[spd$site_i >= 13  & spd$site_j >= 10 & spd$site_j <= 12] <- "Ag-Urb"
+
+
+
+
+library(dplyr)
+upd <- lapply(unique_interations, data.frame, stringsAsFactors = FALSE)
+upd <- bind_rows(upd)
+
+
+### now make a for loop to pick out for each unique pairing where an interaction occurs, all the sites where plant is present/absent, pollinator present/absent, and both present absent. 
+
+##then have to combine these sources of information to into a dataset for binomial modelling.
+
+i <- 1
+
+full_crossing_UI <- vector()
+
+for(i in seq_along(1:dim(upd)[1])){
+temp <- species_driven_turnover[species_driven_turnover$pol == upd$pol[i],][species_driven_turnover[species_driven_turnover$pol == upd$pol[i],]$pla == upd$pla[i],]
+                        
+pol <- upd$pol[i]
+pla <- upd$pla[i]
+
+cross <- tidyr::crossing(upd[i,]$site, temp$site)
+cross$pol <- pol
+cross$pla <- pla
+cross$status <- temp$status
+cross$turn <- 0
+
+for(j in seq_along(1:dim(cross)[1])){
+if(cross$status[j] == "plant_present"){cross$turn[j] <- "pol_turnover"}
+else if (cross$status[j] == "pol_present"){cross$turn[j] <- "plant_turnover"}
+else if (cross$status[j] == "both_present"){cross$turn[j] <- "both_present"}
+else if (cross$status[j] == "both_absent"){cross$turn[j] <- "both_turnover"}
+}
+
+full_crossing_UI <- rbind(full_crossing_UI, cross)
+
+}
+
+colnames(full_crossing_UI) <- c("site_i", "site_j", "pol", "pla", "status", "turn")
+
+full_crossing_UI$site_pair <- paste(full_crossing_UI$site_i, full_crossing_UI$site_j, sep = "_")
+
+full_crossing_UI$interaction_turn <- "1"
+
+unique_int <- vector()
+for(i in seq_along(1:dim(full_crossing_UI)[1])){
+if(full_crossing_UI$site_i[i] == full_crossing_UI$site_j[i]){
+  n <- full_crossing_UI[i,]
+  unique_int <- rbind(unique_int, n)
+}
+}
+
+unique_interactions_dataset <- anti_join(full_crossing_UI, unique_int)
+
+
+
+i <- 1
+full_crossing_SI <- vector()
+
+for(i in seq_along(1:dim(spd)[1])){
+temp <- species_driven_turnover[species_driven_turnover$pol == spd$pol[i],][species_driven_turnover[species_driven_turnover$pol == spd$pol[i],]$pla == spd$pla[i],]
+                        
+pol <- spd$pol[i]
+pla <- spd$pla[i]
+
+cross <- tidyr::crossing(spd[i,]$site_i, temp$site)
+cross$pol <- pol
+cross$pla <- pla
+cross$status <- temp$status
+cross$turn <- 0
+
+for(j in seq_along(1:dim(cross)[1])){
+if(cross$status[j] == "plant_present"){cross$turn[j] <- "pol_turnover"}
+else if (cross$status[j] == "pol_present"){cross$turn[j] <- "plant_turnover"}
+else if (cross$status[j] == "both_present"){cross$turn[j] <- "both_present"}
+else if (cross$status[j] == "both_absent"){cross$turn[j] <- "both_turnover"}
+}
+
+full_crossing_SI <- rbind(full_crossing_SI, cross)
+}
+
+colnames(full_crossing_SI) <- c("site_i", "site_j", "pol", "pla", "status", "turn")
+full_crossing_SI$site_pair <- paste(full_crossing_SI$site_i, full_crossing_SI$site_j, sep = "_")
+
+
+shared_int <- vector()
+for(i in seq_along(1:dim(full_crossing_SI)[1])){
+if(full_crossing_SI$site_i[i] == full_crossing_SI$site_j[i]){
+  n <- full_crossing_SI[i,]
+  shared_int <- rbind(shared_int, n)
+}
+}
+
+shared_interactions_dataset <- anti_join(full_crossing_SI, shared_int)
+
+
+
+spd %>% select(site_i, site_j, pol, pla) %>% 
+  mutate(status = "both_present",
+         turn = "both_present",
+         site_pair = paste(site_i, site_j, sep = "_")) -> spd_intersect
+
+shared_interactions_dataset <- anti_join(shared_interactions_dataset, spd_intersect)
+
+shared_interactions_dataset$interaction_turn <- "1"
+
+
+full_turnover <- rbind(unique_interactions_dataset,shared_interactions_dataset)
+
+
+full_turnover$pol_turn <- 0
+full_turnover$pol_turn[full_turnover$turn == "pol_turnover"] <- 1
+full_turnover$plant_turn <- 0
+full_turnover$plant_turn[full_turnover$turn == "plant_turnover"] <- 1
+full_turnover$both_turn <- 0
+full_turnover$both_turn[full_turnover$turn == "both_turnover"] <- 1
+full_turnover$rewire <- 0
+full_turnover$rewire[full_turnover$turn == "both_present"] <- 1
+
+
+avg_int_freq <- rbind(avg_int_freq_shared, avg_int_freq_unique)
+
+#adding avg interaction frequency to the dataset
+full_turnover$avg_int_freq <- 0
+for(i in seq_along(1:dim(full_turnover)[1])){
+  full_turnover$avg_int_freq[i] <- avg_int_freq$avg_int_freq[avg_int_freq$pol == full_turnover$pol[i] &
+                                                     avg_int_freq$pla == full_turnover$pla[i]][[1]]
+}
+
+
+#adding in the landscape pairing
+full_turnover$landscape <- 0
+full_turnover$landscape[full_turnover$site_i <= 9 & full_turnover$site_j <= 9] <- "Urb-Urb"
+full_turnover$landscape[full_turnover$site_i <= 9 & full_turnover$site_j >= 13] <- "Urb-Ag"
+full_turnover$landscape[full_turnover$site_i >= 13 & full_turnover$site_j <= 9] <- "Ag-Urb"
+full_turnover$landscape[full_turnover$site_i >= 13 & full_turnover$site_j >= 13] <- "Ag-Ag"
+full_turnover$landscape[full_turnover$site_i >= 10  & full_turnover$site_i <= 12 & full_turnover$site_j >= 10 & full_turnover$site_j <= 12] <- "SN-SN"
+full_turnover$landscape[full_turnover$site_i >= 10  & full_turnover$site_i <= 12 & full_turnover$site_j >= 13] <- "SN-Ag"
+full_turnover$landscape[full_turnover$site_i >= 10  & full_turnover$site_i <= 12 & full_turnover$site_j <= 9] <- "SN-Urb"
+full_turnover$landscape[full_turnover$site_i <= 9  & full_turnover$site_j >= 10 & full_turnover$site_j <= 12] <- "Urb-SN"
+full_turnover$landscape[full_turnover$site_i >= 13  & full_turnover$site_j >= 10 & full_turnover$site_j <= 12] <- "Ag-Urb"
+
+
+
+#adding in the intensity landscape pairings
+full_turnover$landint <- 0
+full_turnover$landint[full_turnover$site_i <= 3 & full_turnover$site_j <= 3] <- "High_Urb-High_Urb"
+full_turnover$landint[full_turnover$site_i <= 3 & full_turnover$site_j >= 4 & full_turnover$site_j <= 6] <- "High_Urb-Med_Urb"
+full_turnover$landint[full_turnover$site_i <= 3 & full_turnover$site_j >= 7 & full_turnover$site_j <= 9] <- "High_Urb-low_Urb"
+full_turnover$landint[full_turnover$site_i <= 3 & full_turnover$site_j >= 10 & full_turnover$site_j <= 12] <- "High_Urb-SN"
+full_turnover$landint[full_turnover$site_i <= 3 & full_turnover$site_j >= 13 & full_turnover$site_j <= 15] <- "High_Urb-Low_Ag"
+full_turnover$landint[full_turnover$site_i <= 3 & full_turnover$site_j >= 16 & full_turnover$site_j <= 18] <- "High_Urb-Med_Ag"
+full_turnover$landint[full_turnover$site_i <= 3 & full_turnover$site_j >= 19 & full_turnover$site_j <= 21] <- "High_Urb-High_Ag"
+
+full_turnover$landint[full_turnover$site_i >= 4 & full_turnover$site_i <= 6  & full_turnover$site_j >= 19 & full_turnover$site_j <= 21] <- "Med_Urb-High_Ag"
+full_turnover$landint[full_turnover$site_i >= 4 & full_turnover$site_i <= 6  & full_turnover$site_j >= 16 & full_turnover$site_j <= 18] <- "Med_Urb-Med_Ag"
+full_turnover$landint[full_turnover$site_i >= 4 & full_turnover$site_i <= 6  & full_turnover$site_j >= 13 & full_turnover$site_j <= 15] <- "Med_Urb-Low_Ag"
+full_turnover$landint[full_turnover$site_i >= 4 & full_turnover$site_i <= 6  & full_turnover$site_j >= 10 & full_turnover$site_j <= 12] <- "Med_Urb-SN"
+full_turnover$landint[full_turnover$site_i >= 4 & full_turnover$site_i <= 6  & full_turnover$site_j >= 7 & full_turnover$site_j <= 9] <- "Med_Urb-Low_Urb"
+full_turnover$landint[full_turnover$site_i >= 4 & full_turnover$site_i <= 6  & full_turnover$site_j >= 4 & full_turnover$site_j <= 6] <- "Med_Urb-Med_Urb"
+full_turnover$landint[full_turnover$site_i >= 4 & full_turnover$site_i <= 6  & full_turnover$site_j >= 1 & full_turnover$site_j <= 3] <- "Med_Urb-High_Urb"
+
+full_turnover$landint[full_turnover$site_i >= 7 & full_turnover$site_i <= 9  & full_turnover$site_j >= 19 & full_turnover$site_j <= 21] <- "Low_Urb-High_Ag"
+full_turnover$landint[full_turnover$site_i >= 7 & full_turnover$site_i <= 9  & full_turnover$site_j >= 16 & full_turnover$site_j <= 18] <- "Low_Urb-Med_Ag"
+full_turnover$landint[full_turnover$site_i >= 7 & full_turnover$site_i <= 9  & full_turnover$site_j >= 13 & full_turnover$site_j <= 15] <- "Low_Urb-Low_Ag"
+full_turnover$landint[full_turnover$site_i >= 7 & full_turnover$site_i <= 9  & full_turnover$site_j >= 10 & full_turnover$site_j <= 12] <- "Low_Urb-SN"
+full_turnover$landint[full_turnover$site_i >= 7 & full_turnover$site_i <= 9  & full_turnover$site_j >= 7 & full_turnover$site_j <= 9] <- "Low_Urb-Low_Urb"
+full_turnover$landint[full_turnover$site_i >= 7 & full_turnover$site_i <= 9  & full_turnover$site_j >= 4 & full_turnover$site_j <= 6] <- "Low_Urb-Med_Urb"
+full_turnover$landint[full_turnover$site_i >= 7 & full_turnover$site_i <= 9  & full_turnover$site_j >= 1 & full_turnover$site_j <= 3] <- "Low_Urb-High_Urb"
+
+full_turnover$landint[full_turnover$site_i >= 10 & full_turnover$site_i <= 12  & full_turnover$site_j >= 19 & full_turnover$site_j <= 21] <- "SN-High_Ag"
+full_turnover$landint[full_turnover$site_i >= 10 & full_turnover$site_i <= 12  & full_turnover$site_j >= 16 & full_turnover$site_j <= 18] <- "SN-Med_Ag"
+full_turnover$landint[full_turnover$site_i >= 10 & full_turnover$site_i <= 12  & full_turnover$site_j >= 13 & full_turnover$site_j <= 15] <- "SN-Low_Ag"
+full_turnover$landint[full_turnover$site_i >= 10 & full_turnover$site_i <= 12  & full_turnover$site_j >= 10 & full_turnover$site_j <= 12] <- "SN-SN"
+full_turnover$landint[full_turnover$site_i >= 10 & full_turnover$site_i <= 12  & full_turnover$site_j >= 7 & full_turnover$site_j <= 9] <- "SN-Low_Urb"
+full_turnover$landint[full_turnover$site_i >= 10 & full_turnover$site_i <= 12  & full_turnover$site_j >= 4 & full_turnover$site_j <= 6] <- "SN-Med_Urb"
+full_turnover$landint[full_turnover$site_i >= 10 & full_turnover$site_i <= 12  & full_turnover$site_j >= 1 & full_turnover$site_j <= 3] <- "SN-High_Urb"
+
+full_turnover$landint[full_turnover$site_i >= 13 & full_turnover$site_i <= 15  & full_turnover$site_j >= 19 & full_turnover$site_j <= 21] <- "Low_Ag-High_Ag"
+full_turnover$landint[full_turnover$site_i >= 13 & full_turnover$site_i <= 15  & full_turnover$site_j >= 16 & full_turnover$site_j <= 18] <- "Low_Ag-Med_Ag"
+full_turnover$landint[full_turnover$site_i >= 13 & full_turnover$site_i <= 15  & full_turnover$site_j >= 13 & full_turnover$site_j <= 15] <- "Low_Ag-Low_Ag"
+full_turnover$landint[full_turnover$site_i >= 13 & full_turnover$site_i <= 15  & full_turnover$site_j >= 10 & full_turnover$site_j <= 12] <- "Low_Ag-SN"
+full_turnover$landint[full_turnover$site_i >= 13 & full_turnover$site_i <= 15  & full_turnover$site_j >= 7 & full_turnover$site_j <= 9] <- "Low_Ag-Low_Urb"
+full_turnover$landint[full_turnover$site_i >= 13 & full_turnover$site_i <= 15  & full_turnover$site_j >= 4 & full_turnover$site_j <= 6] <- "Low_Ag-Med_Urb"
+full_turnover$landint[full_turnover$site_i >= 13 & full_turnover$site_i <= 15  & full_turnover$site_j >= 1 & full_turnover$site_j <= 3] <- "Low_Ag-High_Urb"
+
+full_turnover$landint[full_turnover$site_i >= 16 & full_turnover$site_i <= 18  & full_turnover$site_j >= 19 & full_turnover$site_j <= 21] <- "Med_Ag-High_Ag"
+full_turnover$landint[full_turnover$site_i >= 16 & full_turnover$site_i <= 18  & full_turnover$site_j >= 16 & full_turnover$site_j <= 18] <- "Med_Ag-Med_Ag"
+full_turnover$landint[full_turnover$site_i >= 16 & full_turnover$site_i <= 18  & full_turnover$site_j >= 13 & full_turnover$site_j <= 15] <- "Med_Ag-Low_Ag"
+full_turnover$landint[full_turnover$site_i >= 16 & full_turnover$site_i <= 18  & full_turnover$site_j >= 10 & full_turnover$site_j <= 12] <- "Med_Ag-SN"
+full_turnover$landint[full_turnover$site_i >= 16 & full_turnover$site_i <= 18  & full_turnover$site_j >= 7 & full_turnover$site_j <= 9] <- "Med_Ag-Low_Urb"
+full_turnover$landint[full_turnover$site_i >= 16 & full_turnover$site_i <= 18  & full_turnover$site_j >= 4 & full_turnover$site_j <= 6] <- "Med_Ag-Med_Urb"
+full_turnover$landint[full_turnover$site_i >= 16 & full_turnover$site_i <= 18  & full_turnover$site_j >= 1 & full_turnover$site_j <= 3] <- "Med_Ag-High_Urb"
+
+full_turnover$landint[full_turnover$site_i >= 19 & full_turnover$site_i <= 21  & full_turnover$site_j >= 19 & full_turnover$site_j <= 21] <- "High_Ag-High_Ag"
+full_turnover$landint[full_turnover$site_i >= 19 & full_turnover$site_i <= 21  & full_turnover$site_j >= 16 & full_turnover$site_j <= 18] <- "High_Ag-Med_Ag"
+full_turnover$landint[full_turnover$site_i >= 19 & full_turnover$site_i <= 21  & full_turnover$site_j >= 13 & full_turnover$site_j <= 15] <- "High_Ag-Low_Ag"
+full_turnover$landint[full_turnover$site_i >= 19 & full_turnover$site_i <= 21  & full_turnover$site_j >= 10 & full_turnover$site_j <= 12] <- "High_Ag-SN"
+full_turnover$landint[full_turnover$site_i >= 19 & full_turnover$site_i <= 21  & full_turnover$site_j >= 7 & full_turnover$site_j <= 9] <- "High_Ag-Low_Urb"
+full_turnover$landint[full_turnover$site_i >= 19 & full_turnover$site_i <= 21  & full_turnover$site_j >= 4 & full_turnover$site_j <= 6] <- "High_Ag-Med_Urb"
+full_turnover$landint[full_turnover$site_i >= 19 & full_turnover$site_i <= 21  & full_turnover$site_j >= 1 & full_turnover$site_j <= 3] <- "High_Ag-High_Urb"
+
+
+#adding in the intensity pairings
+full_turnover$intensity <- 0
+full_turnover$intensity[full_turnover$site_i <= 3 & full_turnover$site_j <= 3] <- "High-High"
+full_turnover$intensity[full_turnover$site_i <= 3 & full_turnover$site_j >= 4 & full_turnover$site_j <= 6] <- "High-Med"
+full_turnover$intensity[full_turnover$site_i <= 3 & full_turnover$site_j >= 7 & full_turnover$site_j <= 9] <- "High-Low"
+full_turnover$intensity[full_turnover$site_i <= 3 & full_turnover$site_j >= 10 & full_turnover$site_j <= 12] <- "High-SN"
+full_turnover$intensity[full_turnover$site_i <= 3 & full_turnover$site_j >= 13 & full_turnover$site_j <= 15] <- "High-Low"
+full_turnover$intensity[full_turnover$site_i <= 3 & full_turnover$site_j >= 16 & full_turnover$site_j <= 18] <- "High-Med"
+full_turnover$intensity[full_turnover$site_i <= 3 & full_turnover$site_j >= 19 & full_turnover$site_j <= 21] <- "High-High"
+
+full_turnover$intensity[full_turnover$site_i >= 4 & full_turnover$site_i <= 6  & full_turnover$site_j >= 19 & full_turnover$site_j <= 21] <- "Med-High"
+full_turnover$intensity[full_turnover$site_i >= 4 & full_turnover$site_i <= 6  & full_turnover$site_j >= 16 & full_turnover$site_j <= 18] <- "Med-Med"
+full_turnover$intensity[full_turnover$site_i >= 4 & full_turnover$site_i <= 6  & full_turnover$site_j >= 13 & full_turnover$site_j <= 15] <- "Med-Low"
+full_turnover$intensity[full_turnover$site_i >= 4 & full_turnover$site_i <= 6  & full_turnover$site_j >= 10 & full_turnover$site_j <= 12] <- "Med-SN"
+full_turnover$intensity[full_turnover$site_i >= 4 & full_turnover$site_i <= 6  & full_turnover$site_j >= 7 & full_turnover$site_j <= 9] <- "Med-Low"
+full_turnover$intensity[full_turnover$site_i >= 4 & full_turnover$site_i <= 6  & full_turnover$site_j >= 4 & full_turnover$site_j <= 6] <- "Med-Med"
+full_turnover$intensity[full_turnover$site_i >= 4 & full_turnover$site_i <= 6  & full_turnover$site_j >= 1 & full_turnover$site_j <= 3] <- "Med-High"
+
+full_turnover$intensity[full_turnover$site_i >= 7 & full_turnover$site_i <= 9  & full_turnover$site_j >= 19 & full_turnover$site_j <= 21] <- "Low-High"
+full_turnover$intensity[full_turnover$site_i >= 7 & full_turnover$site_i <= 9  & full_turnover$site_j >= 16 & full_turnover$site_j <= 18] <- "Low-Med"
+full_turnover$intensity[full_turnover$site_i >= 7 & full_turnover$site_i <= 9  & full_turnover$site_j >= 13 & full_turnover$site_j <= 15] <- "Low-Low"
+full_turnover$intensity[full_turnover$site_i >= 7 & full_turnover$site_i <= 9  & full_turnover$site_j >= 10 & full_turnover$site_j <= 12] <- "Low-SN"
+full_turnover$intensity[full_turnover$site_i >= 7 & full_turnover$site_i <= 9  & full_turnover$site_j >= 7 & full_turnover$site_j <= 9] <- "Low-Low"
+full_turnover$intensity[full_turnover$site_i >= 7 & full_turnover$site_i <= 9  & full_turnover$site_j >= 4 & full_turnover$site_j <= 6] <- "Low-Med"
+full_turnover$intensity[full_turnover$site_i >= 7 & full_turnover$site_i <= 9  & full_turnover$site_j >= 1 & full_turnover$site_j <= 3] <- "Low-High"
+
+full_turnover$intensity[full_turnover$site_i >= 10 & full_turnover$site_i <= 12  & full_turnover$site_j >= 19 & full_turnover$site_j <= 21] <- "SN-High"
+full_turnover$intensity[full_turnover$site_i >= 10 & full_turnover$site_i <= 12  & full_turnover$site_j >= 16 & full_turnover$site_j <= 18] <- "SN-Med"
+full_turnover$intensity[full_turnover$site_i >= 10 & full_turnover$site_i <= 12  & full_turnover$site_j >= 13 & full_turnover$site_j <= 15] <- "SN-Low"
+full_turnover$intensity[full_turnover$site_i >= 10 & full_turnover$site_i <= 12  & full_turnover$site_j >= 10 & full_turnover$site_j <= 12] <- "SN-SN"
+full_turnover$intensity[full_turnover$site_i >= 10 & full_turnover$site_i <= 12  & full_turnover$site_j >= 7 & full_turnover$site_j <= 9] <- "SN-Low"
+full_turnover$intensity[full_turnover$site_i >= 10 & full_turnover$site_i <= 12  & full_turnover$site_j >= 4 & full_turnover$site_j <= 6] <- "SN-Med"
+full_turnover$intensity[full_turnover$site_i >= 10 & full_turnover$site_i <= 12  & full_turnover$site_j >= 1 & full_turnover$site_j <= 3] <- "SN-High"
+
+full_turnover$intensity[full_turnover$site_i >= 13 & full_turnover$site_i <= 15  & full_turnover$site_j >= 19 & full_turnover$site_j <= 21] <- "Low-High"
+full_turnover$intensity[full_turnover$site_i >= 13 & full_turnover$site_i <= 15  & full_turnover$site_j >= 16 & full_turnover$site_j <= 18] <- "Low-Med"
+full_turnover$intensity[full_turnover$site_i >= 13 & full_turnover$site_i <= 15  & full_turnover$site_j >= 13 & full_turnover$site_j <= 15] <- "Low-Low"
+full_turnover$intensity[full_turnover$site_i >= 13 & full_turnover$site_i <= 15  & full_turnover$site_j >= 10 & full_turnover$site_j <= 12] <- "Low-SN"
+full_turnover$intensity[full_turnover$site_i >= 13 & full_turnover$site_i <= 15  & full_turnover$site_j >= 7 & full_turnover$site_j <= 9] <- "Low-Low"
+full_turnover$intensity[full_turnover$site_i >= 13 & full_turnover$site_i <= 15  & full_turnover$site_j >= 4 & full_turnover$site_j <= 6] <- "Low-Med"
+full_turnover$intensity[full_turnover$site_i >= 13 & full_turnover$site_i <= 15  & full_turnover$site_j >= 1 & full_turnover$site_j <= 3] <- "Low-High"
+
+full_turnover$intensity[full_turnover$site_i >= 16 & full_turnover$site_i <= 18  & full_turnover$site_j >= 19 & full_turnover$site_j <= 21] <- "Med-High"
+full_turnover$intensity[full_turnover$site_i >= 16 & full_turnover$site_i <= 18  & full_turnover$site_j >= 16 & full_turnover$site_j <= 18] <- "Med-Med"
+full_turnover$intensity[full_turnover$site_i >= 16 & full_turnover$site_i <= 18  & full_turnover$site_j >= 13 & full_turnover$site_j <= 15] <- "Med-Low"
+full_turnover$intensity[full_turnover$site_i >= 16 & full_turnover$site_i <= 18  & full_turnover$site_j >= 10 & full_turnover$site_j <= 12] <- "Med-SN"
+full_turnover$intensity[full_turnover$site_i >= 16 & full_turnover$site_i <= 18  & full_turnover$site_j >= 7 & full_turnover$site_j <= 9] <- "Med-Low"
+full_turnover$intensity[full_turnover$site_i >= 16 & full_turnover$site_i <= 18  & full_turnover$site_j >= 4 & full_turnover$site_j <= 6] <- "Med-Med"
+full_turnover$intensity[full_turnover$site_i >= 16 & full_turnover$site_i <= 18  & full_turnover$site_j >= 1 & full_turnover$site_j <= 3] <- "Med-High"
+
+full_turnover$intensity[full_turnover$site_i >= 19 & full_turnover$site_i <= 21  & full_turnover$site_j >= 19 & full_turnover$site_j <= 21] <- "High-High"
+full_turnover$intensity[full_turnover$site_i >= 19 & full_turnover$site_i <= 21  & full_turnover$site_j >= 16 & full_turnover$site_j <= 18] <- "High-Med"
+full_turnover$intensity[full_turnover$site_i >= 19 & full_turnover$site_i <= 21  & full_turnover$site_j >= 13 & full_turnover$site_j <= 15] <- "High-Low"
+full_turnover$intensity[full_turnover$site_i >= 19 & full_turnover$site_i <= 21  & full_turnover$site_j >= 10 & full_turnover$site_j <= 12] <- "High-SN"
+full_turnover$intensity[full_turnover$site_i >= 19 & full_turnover$site_i <= 21  & full_turnover$site_j >= 7 & full_turnover$site_j <= 9] <- "High-Low"
+full_turnover$intensity[full_turnover$site_i >= 19 & full_turnover$site_i <= 21  & full_turnover$site_j >= 4 & full_turnover$site_j <= 6] <- "High-Med"
+full_turnover$intensity[full_turnover$site_i >= 19 & full_turnover$site_i <= 21  & full_turnover$site_j >= 1 & full_turnover$site_j <= 3] <- "High-High"
+
+
+
+#adding in the geographical and environmental distance between sites
+full_turnover$dist <- 0
+full_turnover$grad <- 0
+for(i in seq_along(1:dim(full_turnover)[1])){
+  if(full_turnover$site_i[i] > full_turnover$site_j[i]){
+  full_turnover$dist[i] <- vars$dist[vars$row == full_turnover$site_i[i] & vars$col == full_turnover$site_j[i]]
+  full_turnover$grad[i] <- vars$grad[vars$row == full_turnover$site_i[i] & vars$col == full_turnover$site_j[i]]}
+  else if(full_turnover$site_j[i] > full_turnover$site_i[i]){
+  full_turnover$dist[i] <- vars$dist[vars$row == full_turnover$site_j[i] & vars$col == full_turnover$site_i[i]]
+  full_turnover$grad[i] <- vars$grad[vars$row == full_turnover$site_j[i] & vars$col == full_turnover$site_i[i]]
+  }
+}
+
+#adding in the average urbanisation, agri index and semi nat score of the paired sites
+full_turnover$Impervious_Avg <- 0
+full_turnover$AgIndex_Avg <- 0
+full_turnover$Semi_Nat_Avg <- 0
+for(i in seq_along(1:dim(full_turnover)[1])){
+    full_turnover$Impervious_Avg[i] <- (Sites$Impervious[Sites$Id == full_turnover$site_i[i]] +
+      Sites$Impervious[Sites$Id == full_turnover$site_j[i]])/2
+    full_turnover$AgIndex_Avg[i] <- (Sites$AgIndex[Sites$Id == full_turnover$site_i[i]] +
+      Sites$AgIndex[Sites$Id == full_turnover$site_j[i]])/2
+    full_turnover$Semi_Nat_Avg[i] <- (Sites$Semi_Nat[Sites$Id == full_turnover$site_i[i]] +
+      Sites$Semi_Nat[Sites$Id == full_turnover$site_j[i]])/2
+}
+
+
+#adding in visitor group
+
+full_turnover$pollinator_type <- 0
+for(i in seq_along(1:dim(full_turnover)[1])){
+  full_turnover$pollinator_type[i] <- first(na.omit(network$VisitorGroup[network$FlowerVisitorSpecies == full_turnover$pol[i]]))
+}
+
+#adding in plant origin and family
+
+full_turnover$Plant_Origin <- 0
+for(i in seq_along(1:dim(full_turnover)[1])){
+  full_turnover$Plant_Origin[i] <- first(na.omit(network$Introduced.[network$PlantSpecies == full_turnover$pla[i]]))
+}
+
+full_turnover$plant_family <- 0
+for(i in seq_along(1:dim(full_turnover)[1])){
+  full_turnover$plant_family[i] <- first(na.omit(network$Plant_Family[network$PlantSpecies == full_turnover$pla[i]]))
+}
+
+i <- 1
+#calculating the relative difference in floral unit abundance between site pairs
+full_turnover$rel_abund <- 0
+for(i in seq_along(1:dim(full_turnover)[1])){
+ if(full_turnover$turn[i] == "pol_turnover" | full_turnover$turn[i] == "both_present"){
+  full_turnover$rel_abund[i] <- (sum(na.omit(network$FlowerAbundancePerPlantSpecies[network$PlantSpecies == full_turnover$pla[i] & network$Site_ID == full_turnover$site_i[i]])) - sum(na.omit(network$FlowerAbundancePerPlantSpecies[network$PlantSpecies == full_turnover$pla[i] & network$Site_ID == full_turnover$site_j[i]]))) / 
+  (sum(na.omit(network$FlowerAbundancePerPlantSpecies[network$PlantSpecies == full_turnover$pla[i] & network$Site_ID == full_turnover$site_i[i]])) + sum(na.omit(network$FlowerAbundancePerPlantSpecies[network$PlantSpecies == full_turnover$pla[i] & network$Site_ID == full_turnover$site_j[i]])))}
+  else if(full_turnover$turn[i] == "plant_turnover" | full_turnover$turn[i] == "both_turnover"){
+    full_turnover$rel_abund[i] <- NA
+  }
+}
+
+ 
+
+i <- 1
+full_turnover$abs_abund <- 0
+for(i in seq_along(1:dim(full_turnover)[1])){
+  if(full_turnover$turn[i] == "pol_turnover" | full_turnover$turn[i] == "both_present"){
+  full_turnover$abs_abund[i] <- (sum(na.omit(network$FlowerAbundancePerPlantSpecies[network$PlantSpecies == full_turnover$pla[i] & network$Site_ID == full_turnover$site_i[i]])) - sum(na.omit(network$FlowerAbundancePerPlantSpecies[network$PlantSpecies == full_turnover$pla[i] & network$Site_ID == full_turnover$site_j[i]])))
+  }
+  else if(full_turnover$turn[i] == "plant_turnover" | full_turnover$turn[i] == "both_turnover"){
+    full_turnover$abs_abund[i] <- NA
+  }
+}
+
+saveRDS(full_turnover, file = "full_turnover.Rda")
+full_turnover <- readRDS(file = "full_turnover.Rda")
+
+rewiring <- full_turnover[full_turnover$status == "both_present",]
+```
+
+
+
+# Interaction Rewiring Dataset Prep
+
+adding the rewiring data from unique interactions to the rewiring data from the shared interactions
+
+Have to create shared interactions dataset as need to seperate true instances of rewiring to instances where both species are present but no interaction occures at both sites - an absent interaction pair.
+```{r}
+#extracting the average interaction frequency for each unique pairing that interacts in at least two sites
+#extracting the average interaction frequency for each unique pairing that interacts in at least two sites
+avg_int_freq_shared <- data.frame(avg_int_freq = I(vector(mode="numeric", length=253)),
+                          pol = I(vector(mode="character", length=253)),
+                          pla = I(vector(mode="character", length=253)))
+
+for(i in seq_along(1:length(avg_int_freq_shared$avg_int_freq))){
+  avg_int_freq_shared$avg_int_freq[i] <- mean(shared_interactions[[i]][["data"]]$int)
+  avg_int_freq_shared$pol[i] <- shared_interactions[[i]]$pol
+  avg_int_freq_shared$pla[i] <- shared_interactions[[i]]$pla
+}
+
+i <- 2
+
+#filtering data to the sites where the unique pairing interaction happened or both weren't observed interacting
+
+shared_pairing_data <- vector("list", 253)
+for (i in seq_along(1:253)){
+shared_pairing_data[[i]][["data"]] <- dplyr::distinct(shared_interactions[[i]][["data"]], site_pair, turn, .keep_all = TRUE)
+shared_pairing_data[[i]][["data"]]$pol <- shared_interactions[[i]]$pol
+shared_pairing_data[[i]][["data"]]$pla <- shared_interactions[[i]]$pla
+}
+
+#creating a dataframe to carryout statistical modelling on.
+
+library(dplyr)
+spd <- lapply(shared_pairing_data, data.frame, stringsAsFactors = FALSE)
+spd <- bind_rows(spd)
+
+colnames(spd) <- c("site_i", "site_j", "int", "turn", "site_pair" ,"pol", "pla")
+
+
+#adding avg interaction frequency to the dataset
+spd$avg_int_freq <- 0
+for(i in seq_along(1:dim(spd)[1])){
+  spd$avg_int_freq[i] <- avg_int_freq_shared$avg_int_freq[avg_int_freq_shared$pol == spd$pol[i] &
+                                                     avg_int_freq_shared$pla == spd$pla[i]]
+}
+
+#adding in the landscape pairing
+spd$landscape <- 0
+spd$landscape[spd$site_i <= 9 & spd$site_j <= 9] <- "Urb-Urb"
+spd$landscape[spd$site_i <= 9 & spd$site_j >= 13] <- "Urb-Ag"
+spd$landscape[spd$site_i >= 13 & spd$site_j <= 9] <- "Ag-Urb"
+spd$landscape[spd$site_i >= 13 & spd$site_j >= 13] <- "Ag-Ag"
+spd$landscape[spd$site_i >= 10  & spd$site_i <= 12 & spd$site_j >= 10 & spd$site_j <= 12] <- "SN-SN"
+spd$landscape[spd$site_i >= 10  & spd$site_i <= 12 & spd$site_j >= 13] <- "SN-Ag"
+spd$landscape[spd$site_i >= 10  & spd$site_i <= 12 & spd$site_j <= 9] <- "SN-Urb"
+spd$landscape[spd$site_i <= 9  & spd$site_j >= 10 & spd$site_j <= 12] <- "Urb-SN"
+spd$landscape[spd$site_i >= 13  & spd$site_j >= 10 & spd$site_j <= 12] <- "Ag-Urb"
+
+#adding in the landscape pairing
+spd$landscape <- 0
+spd$landscape[spd$site_i <= 9 & spd$site_j <= 9] <- "Urb-Urb"
+spd$landscape[spd$site_i <= 9 & spd$site_j >= 13] <- "Urb-Ag"
+spd$landscape[spd$site_i >= 13 & spd$site_j <= 9] <- "Ag-Urb"
+spd$landscape[spd$site_i >= 13 & spd$site_j >= 13] <- "Ag-Ag"
+spd$landscape[spd$site_i >= 10  & spd$site_i <= 12 & spd$site_j >= 10 & spd$site_j <= 12] <- "SN-SN"
+spd$landscape[spd$site_i >= 10  & spd$site_i <= 12 & spd$site_j >= 13] <- "SN-Ag"
+spd$landscape[spd$site_i >= 10  & spd$site_i <= 12 & spd$site_j <= 9] <- "SN-Urb"
+spd$landscape[spd$site_i <= 9  & spd$site_j >= 10 & spd$site_j <= 12] <- "Urb-SN"
+spd$landscape[spd$site_i >= 13  & spd$site_j >= 10 & spd$site_j <= 12] <- "Ag-Urb"
+
+#adding in the intensity landscape pairings
+spd$landint <- 0
+spd$landint[spd$site_i <= 3 & spd$site_j <= 3] <- "High_Urb-High_Urb"
+spd$landint[spd$site_i <= 3 & spd$site_j >= 4 & spd$site_j <= 6] <- "High_Urb-Med_Urb"
+spd$landint[spd$site_i <= 3 & spd$site_j >= 7 & spd$site_j <= 9] <- "High_Urb-low_Urb"
+spd$landint[spd$site_i <= 3 & spd$site_j >= 10 & spd$site_j <= 12] <- "High_Urb-SN"
+spd$landint[spd$site_i <= 3 & spd$site_j >= 13 & spd$site_j <= 15] <- "High_Urb-Low_Ag"
+spd$landint[spd$site_i <= 3 & spd$site_j >= 16 & spd$site_j <= 18] <- "High_Urb-Med_Ag"
+spd$landint[spd$site_i <= 3 & spd$site_j >= 19 & spd$site_j <= 21] <- "High_Urb-High_Ag"
+
+spd$landint[spd$site_i >= 4 & spd$site_i <= 6  & spd$site_j >= 19 & spd$site_j <= 21] <- "Med_Urb-High_Ag"
+spd$landint[spd$site_i >= 4 & spd$site_i <= 6  & spd$site_j >= 16 & spd$site_j <= 18] <- "Med_Urb-Med_Ag"
+spd$landint[spd$site_i >= 4 & spd$site_i <= 6  & spd$site_j >= 13 & spd$site_j <= 15] <- "Med_Urb-Low_Ag"
+spd$landint[spd$site_i >= 4 & spd$site_i <= 6  & spd$site_j >= 10 & spd$site_j <= 12] <- "Med_Urb-SN"
+spd$landint[spd$site_i >= 4 & spd$site_i <= 6  & spd$site_j >= 7 & spd$site_j <= 9] <- "Med_Urb-Low_Urb"
+spd$landint[spd$site_i >= 4 & spd$site_i <= 6  & spd$site_j >= 4 & spd$site_j <= 6] <- "Med_Urb-Med_Urb"
+spd$landint[spd$site_i >= 4 & spd$site_i <= 6  & spd$site_j >= 1 & spd$site_j <= 3] <- "Med_Urb-High_Urb"
+
+spd$landint[spd$site_i >= 7 & spd$site_i <= 9  & spd$site_j >= 19 & spd$site_j <= 21] <- "Low_Urb-High_Ag"
+spd$landint[spd$site_i >= 7 & spd$site_i <= 9  & spd$site_j >= 16 & spd$site_j <= 18] <- "Low_Urb-Med_Ag"
+spd$landint[spd$site_i >= 7 & spd$site_i <= 9  & spd$site_j >= 13 & spd$site_j <= 15] <- "Low_Urb-Low_Ag"
+spd$landint[spd$site_i >= 7 & spd$site_i <= 9  & spd$site_j >= 10 & spd$site_j <= 12] <- "Low_Urb-SN"
+spd$landint[spd$site_i >= 7 & spd$site_i <= 9  & spd$site_j >= 7 & spd$site_j <= 9] <- "Low_Urb-Low_Urb"
+spd$landint[spd$site_i >= 7 & spd$site_i <= 9  & spd$site_j >= 4 & spd$site_j <= 6] <- "Low_Urb-Med_Urb"
+spd$landint[spd$site_i >= 7 & spd$site_i <= 9  & spd$site_j >= 1 & spd$site_j <= 3] <- "Low_Urb-High_Urb"
+
+spd$landint[spd$site_i >= 10 & spd$site_i <= 12  & spd$site_j >= 19 & spd$site_j <= 21] <- "SN-High_Ag"
+spd$landint[spd$site_i >= 10 & spd$site_i <= 12  & spd$site_j >= 16 & spd$site_j <= 18] <- "SN-Med_Ag"
+spd$landint[spd$site_i >= 10 & spd$site_i <= 12  & spd$site_j >= 13 & spd$site_j <= 15] <- "SN-Low_Ag"
+spd$landint[spd$site_i >= 10 & spd$site_i <= 12  & spd$site_j >= 10 & spd$site_j <= 12] <- "SN-SN"
+spd$landint[spd$site_i >= 10 & spd$site_i <= 12  & spd$site_j >= 7 & spd$site_j <= 9] <- "SN-Low_Urb"
+spd$landint[spd$site_i >= 10 & spd$site_i <= 12  & spd$site_j >= 4 & spd$site_j <= 6] <- "SN-Med_Urb"
+spd$landint[spd$site_i >= 10 & spd$site_i <= 12  & spd$site_j >= 1 & spd$site_j <= 3] <- "SN-High_Urb"
+
+spd$landint[spd$site_i >= 13 & spd$site_i <= 15  & spd$site_j >= 19 & spd$site_j <= 21] <- "Low_Ag-High_Ag"
+spd$landint[spd$site_i >= 13 & spd$site_i <= 15  & spd$site_j >= 16 & spd$site_j <= 18] <- "Low_Ag-Med_Ag"
+spd$landint[spd$site_i >= 13 & spd$site_i <= 15  & spd$site_j >= 13 & spd$site_j <= 15] <- "Low_Ag-Low_Ag"
+spd$landint[spd$site_i >= 13 & spd$site_i <= 15  & spd$site_j >= 10 & spd$site_j <= 12] <- "Low_Ag-SN"
+spd$landint[spd$site_i >= 13 & spd$site_i <= 15  & spd$site_j >= 7 & spd$site_j <= 9] <- "Low_Ag-Low_Urb"
+spd$landint[spd$site_i >= 13 & spd$site_i <= 15  & spd$site_j >= 4 & spd$site_j <= 6] <- "Low_Ag-Med_Urb"
+spd$landint[spd$site_i >= 13 & spd$site_i <= 15  & spd$site_j >= 1 & spd$site_j <= 3] <- "Low_Ag-High_Urb"
+
+spd$landint[spd$site_i >= 16 & spd$site_i <= 18  & spd$site_j >= 19 & spd$site_j <= 21] <- "Med_Ag-High_Ag"
+spd$landint[spd$site_i >= 16 & spd$site_i <= 18  & spd$site_j >= 16 & spd$site_j <= 18] <- "Med_Ag-Med_Ag"
+spd$landint[spd$site_i >= 16 & spd$site_i <= 18  & spd$site_j >= 13 & spd$site_j <= 15] <- "Med_Ag-Low_Ag"
+spd$landint[spd$site_i >= 16 & spd$site_i <= 18  & spd$site_j >= 10 & spd$site_j <= 12] <- "Med_Ag-SN"
+spd$landint[spd$site_i >= 16 & spd$site_i <= 18  & spd$site_j >= 7 & spd$site_j <= 9] <- "Med_Ag-Low_Urb"
+spd$landint[spd$site_i >= 16 & spd$site_i <= 18  & spd$site_j >= 4 & spd$site_j <= 6] <- "Med_Ag-Med_Urb"
+spd$landint[spd$site_i >= 16 & spd$site_i <= 18  & spd$site_j >= 1 & spd$site_j <= 3] <- "Med_Ag-High_Urb"
+
+spd$landint[spd$site_i >= 19 & spd$site_i <= 21  & spd$site_j >= 19 & spd$site_j <= 21] <- "High_Ag-High_Ag"
+spd$landint[spd$site_i >= 19 & spd$site_i <= 21  & spd$site_j >= 16 & spd$site_j <= 18] <- "High_Ag-Med_Ag"
+spd$landint[spd$site_i >= 19 & spd$site_i <= 21  & spd$site_j >= 13 & spd$site_j <= 15] <- "High_Ag-Low_Ag"
+spd$landint[spd$site_i >= 19 & spd$site_i <= 21  & spd$site_j >= 10 & spd$site_j <= 12] <- "High_Ag-SN"
+spd$landint[spd$site_i >= 19 & spd$site_i <= 21  & spd$site_j >= 7 & spd$site_j <= 9] <- "High_Ag-Low_Urb"
+spd$landint[spd$site_i >= 19 & spd$site_i <= 21  & spd$site_j >= 4 & spd$site_j <= 6] <- "High_Ag-Med_Urb"
+spd$landint[spd$site_i >= 19 & spd$site_i <= 21  & spd$site_j >= 1 & spd$site_j <= 3] <- "High_Ag-High_Urb"
+
+
+#adding in the intensity pairings
+spd$intensity <- 0
+spd$intensity[spd$site_i <= 3 & spd$site_j <= 3] <- "High-High"
+spd$intensity[spd$site_i <= 3 & spd$site_j >= 4 & spd$site_j <= 6] <- "High-Med"
+spd$intensity[spd$site_i <= 3 & spd$site_j >= 7 & spd$site_j <= 9] <- "High-Low"
+spd$intensity[spd$site_i <= 3 & spd$site_j >= 10 & spd$site_j <= 12] <- "High-SN"
+spd$intensity[spd$site_i <= 3 & spd$site_j >= 13 & spd$site_j <= 15] <- "High-Low"
+spd$intensity[spd$site_i <= 3 & spd$site_j >= 16 & spd$site_j <= 18] <- "High-Med"
+spd$intensity[spd$site_i <= 3 & spd$site_j >= 19 & spd$site_j <= 21] <- "High-High"
+
+spd$intensity[spd$site_i >= 4 & spd$site_i <= 6  & spd$site_j >= 19 & spd$site_j <= 21] <- "Med-High"
+spd$intensity[spd$site_i >= 4 & spd$site_i <= 6  & spd$site_j >= 16 & spd$site_j <= 18] <- "Med-Med"
+spd$intensity[spd$site_i >= 4 & spd$site_i <= 6  & spd$site_j >= 13 & spd$site_j <= 15] <- "Med-Low"
+spd$intensity[spd$site_i >= 4 & spd$site_i <= 6  & spd$site_j >= 10 & spd$site_j <= 12] <- "Med-SN"
+spd$intensity[spd$site_i >= 4 & spd$site_i <= 6  & spd$site_j >= 7 & spd$site_j <= 9] <- "Med-Low"
+spd$intensity[spd$site_i >= 4 & spd$site_i <= 6  & spd$site_j >= 4 & spd$site_j <= 6] <- "Med-Med"
+spd$intensity[spd$site_i >= 4 & spd$site_i <= 6  & spd$site_j >= 1 & spd$site_j <= 3] <- "Med-High"
+
+spd$intensity[spd$site_i >= 7 & spd$site_i <= 9  & spd$site_j >= 19 & spd$site_j <= 21] <- "Low-High"
+spd$intensity[spd$site_i >= 7 & spd$site_i <= 9  & spd$site_j >= 16 & spd$site_j <= 18] <- "Low-Med"
+spd$intensity[spd$site_i >= 7 & spd$site_i <= 9  & spd$site_j >= 13 & spd$site_j <= 15] <- "Low-Low"
+spd$intensity[spd$site_i >= 7 & spd$site_i <= 9  & spd$site_j >= 10 & spd$site_j <= 12] <- "Low-SN"
+spd$intensity[spd$site_i >= 7 & spd$site_i <= 9  & spd$site_j >= 7 & spd$site_j <= 9] <- "Low-Low"
+spd$intensity[spd$site_i >= 7 & spd$site_i <= 9  & spd$site_j >= 4 & spd$site_j <= 6] <- "Low-Med"
+spd$intensity[spd$site_i >= 7 & spd$site_i <= 9  & spd$site_j >= 1 & spd$site_j <= 3] <- "Low-High"
+
+spd$intensity[spd$site_i >= 10 & spd$site_i <= 12  & spd$site_j >= 19 & spd$site_j <= 21] <- "SN-High"
+spd$intensity[spd$site_i >= 10 & spd$site_i <= 12  & spd$site_j >= 16 & spd$site_j <= 18] <- "SN-Med"
+spd$intensity[spd$site_i >= 10 & spd$site_i <= 12  & spd$site_j >= 13 & spd$site_j <= 15] <- "SN-Low"
+spd$intensity[spd$site_i >= 10 & spd$site_i <= 12  & spd$site_j >= 10 & spd$site_j <= 12] <- "SN-SN"
+spd$intensity[spd$site_i >= 10 & spd$site_i <= 12  & spd$site_j >= 7 & spd$site_j <= 9] <- "SN-Low"
+spd$intensity[spd$site_i >= 10 & spd$site_i <= 12  & spd$site_j >= 4 & spd$site_j <= 6] <- "SN-Med"
+spd$intensity[spd$site_i >= 10 & spd$site_i <= 12  & spd$site_j >= 1 & spd$site_j <= 3] <- "SN-High"
+
+spd$intensity[spd$site_i >= 13 & spd$site_i <= 15  & spd$site_j >= 19 & spd$site_j <= 21] <- "Low-High"
+spd$intensity[spd$site_i >= 13 & spd$site_i <= 15  & spd$site_j >= 16 & spd$site_j <= 18] <- "Low-Med"
+spd$intensity[spd$site_i >= 13 & spd$site_i <= 15  & spd$site_j >= 13 & spd$site_j <= 15] <- "Low-Low"
+spd$intensity[spd$site_i >= 13 & spd$site_i <= 15  & spd$site_j >= 10 & spd$site_j <= 12] <- "Low-SN"
+spd$intensity[spd$site_i >= 13 & spd$site_i <= 15  & spd$site_j >= 7 & spd$site_j <= 9] <- "Low-Low"
+spd$intensity[spd$site_i >= 13 & spd$site_i <= 15  & spd$site_j >= 4 & spd$site_j <= 6] <- "Low-Med"
+spd$intensity[spd$site_i >= 13 & spd$site_i <= 15  & spd$site_j >= 1 & spd$site_j <= 3] <- "Low-High"
+
+spd$intensity[spd$site_i >= 16 & spd$site_i <= 18  & spd$site_j >= 19 & spd$site_j <= 21] <- "Med-High"
+spd$intensity[spd$site_i >= 16 & spd$site_i <= 18  & spd$site_j >= 16 & spd$site_j <= 18] <- "Med-Med"
+spd$intensity[spd$site_i >= 16 & spd$site_i <= 18  & spd$site_j >= 13 & spd$site_j <= 15] <- "Med-Low"
+spd$intensity[spd$site_i >= 16 & spd$site_i <= 18  & spd$site_j >= 10 & spd$site_j <= 12] <- "Med-SN"
+spd$intensity[spd$site_i >= 16 & spd$site_i <= 18  & spd$site_j >= 7 & spd$site_j <= 9] <- "Med-Low"
+spd$intensity[spd$site_i >= 16 & spd$site_i <= 18  & spd$site_j >= 4 & spd$site_j <= 6] <- "Med-Med"
+spd$intensity[spd$site_i >= 16 & spd$site_i <= 18  & spd$site_j >= 1 & spd$site_j <= 3] <- "Med-High"
+
+spd$intensity[spd$site_i >= 19 & spd$site_i <= 21  & spd$site_j >= 19 & spd$site_j <= 21] <- "High-High"
+spd$intensity[spd$site_i >= 19 & spd$site_i <= 21  & spd$site_j >= 16 & spd$site_j <= 18] <- "High-Med"
+spd$intensity[spd$site_i >= 19 & spd$site_i <= 21  & spd$site_j >= 13 & spd$site_j <= 15] <- "High-Low"
+spd$intensity[spd$site_i >= 19 & spd$site_i <= 21  & spd$site_j >= 10 & spd$site_j <= 12] <- "High-SN"
+spd$intensity[spd$site_i >= 19 & spd$site_i <= 21  & spd$site_j >= 7 & spd$site_j <= 9] <- "High-Low"
+spd$intensity[spd$site_i >= 19 & spd$site_i <= 21  & spd$site_j >= 4 & spd$site_j <= 6] <- "High-Med"
+spd$intensity[spd$site_i >= 19 & spd$site_i <= 21  & spd$site_j >= 1 & spd$site_j <= 3] <- "High-High"
+
+
+#adding in the geographical distance between sites
+i=1
+
+spd$dist <- 0
+spd$grad <- 0
+for(i in seq_along(1:dim(spd)[1])){
+  spd$dist[i] <- vars$dist[vars$col == spd$site_i[i] & vars$row == spd$site_j[i]]
+  spd$grad[i] <- vars$grad[vars$col == spd$site_i[i] & vars$row == spd$site_j[i]]
+}
+
+
+
+#adding in the average urbanisation, agri index and semi nat score of the paired sites
+spd$Impervious_Avg <- 0
+spd$AgIndex_Avg <- 0
+spd$Semi_Nat_Avg <- 0
+for(i in seq_along(1:dim(spd)[1])){
+    spd$Impervious_Avg[i] <- (Sites$Impervious[Sites$Id == spd$site_i[i]] +
+      Sites$Impervious[Sites$Id == spd$site_j[i]])/2
+    spd$AgIndex_Avg[i] <- (Sites$AgIndex[Sites$Id == spd$site_i[i]] +
+      Sites$AgIndex[Sites$Id == spd$site_j[i]])/2
+    spd$Semi_Nat_Avg[i] <- (Sites$Semi_Nat[Sites$Id == spd$site_i[i]] +
+      Sites$Semi_Nat[Sites$Id == spd$site_j[i]])/2
+}
+
+
+#adding in visitor group
+
+spd$pollinator_type <- 0
+for(i in seq_along(1:dim(spd)[1])){
+  spd$pollinator_type[i] <- first(na.omit(network$VisitorGroup[network$FlowerVisitorSpecies == spd$pol[i]]))
+}
+
+#adding in plant origin and family
+
+spd$Plant_Origin <- 0
+for(i in seq_along(1:dim(spd)[1])){
+  spd$Plant_Origin[i] <- first(na.omit(network$Introduced.[network$PlantSpecies == spd$pla[i]]))
+}
+
+spd$plant_family <- 0
+for(i in seq_along(1:dim(spd)[1])){
+  spd$plant_family[i] <- first(na.omit(network$Plant_Family[network$PlantSpecies == spd$pla[i]]))
+}
+
+#calculating the relative difference in floral unit abundance between site pairs
+spd$rel_abund <- 0
+for(i in seq_along(1:dim(spd)[1])){
+
+  spd$rel_abund[i] <- (sum(na.omit(network$FlowerAbundancePerPlantSpecies[network$PlantSpecies == spd$pla[i] & network$Site_ID == spd$site_i[i]])) - sum(na.omit(network$FlowerAbundancePerPlantSpecies[network$PlantSpecies == spd$pla[i] & network$Site_ID == spd$site_j[i]]))) / 
+  (sum(na.omit(network$FlowerAbundancePerPlantSpecies[network$PlantSpecies == spd$pla[i] & network$Site_ID == spd$site_i[i]])) + sum(na.omit(network$FlowerAbundancePerPlantSpecies[network$PlantSpecies == spd$pla[i] & network$Site_ID == spd$site_j[i]])))
+}
+
+spd$abs_abund <- 0
+for(i in seq_along(1:dim(spd)[1])){
+
+  spd$abs_abund[i] <- (sum(na.omit(network$FlowerAbundancePerPlantSpecies[network$PlantSpecies == spd$pla[i] & network$Site_ID == spd$site_i[i]])) - sum(na.omit(network$FlowerAbundancePerPlantSpecies[network$PlantSpecies == spd$pla[i] & network$Site_ID == spd$site_j[i]])))
+}
+
+
+
+
+
+#creating the binomial data
+spd$Turnover <- 0
+
+spd$Turnover[spd$turn == "T"] <- 1
+spd$Turnover[spd$turn == "C"] <- 0
+spd$Turnover[spd$turn == "A"] <- NA
+
+#subsetting out NA
+bin_data <- spd[!is.na(spd$Turnover),]
+
+bin_data %>% select(site_i, site_j, site_pair, pol, pla, avg_int_freq, landscape, landint,
+                    intensity, dist, grad, pollinator_type, Plant_Origin, plant_family, rel_abund,
+                    abs_abund, Impervious_Avg, AgIndex_Avg, Semi_Nat_Avg, Turnover) -> Shared_Rewire
+
+rewiring %>% select(site_i, site_j, site_pair, pol, pla, avg_int_freq, landscape, landint,
+                    intensity, dist, grad, pollinator_type, Plant_Origin, plant_family, rel_abund,
+                    abs_abund, Impervious_Avg, AgIndex_Avg, Semi_Nat_Avg, rewire) -> Unique_Rewire
+
+colnames(Unique_Rewire) <- c("site_i", "site_j", "site_pair", "pol", "pla", "avg_int_freq", "landscape", 
+                  "landint","intensity", "dist", "grad", "pollinator_type", "Plant_Origin",
+                  "plant_family", "rel_abund", "abs_abund", "Impervious_Avg", "AgIndex_Avg",
+                  "Semi_Nat_Avg", "Turnover")
+
+Rewire <- rbind(Unique_Rewire, Shared_Rewire)
+
+```
+
+## Predicting interaction turnover due to rewiring
+
+How well can we predict when an interaction will turnover due to rewiring?
+```{r}
+#create dataset with scaled predictors to be able to predict with
+scaled_data <- Rewire
+
+scaled_data$index <- 1:dim(scaled_data)[1]
+scaled_data$avg_int_freq <- scale(scaled_data$avg_int_freq,
+                                  scale = TRUE)
+
+scaled_data$abs_abund <- scale(scaled_data$abs_abund,
+                                  scale = TRUE)
+
+scaled_data$rel_abund <- scale(scaled_data$rel_abund,
+                                  scale = TRUE)
+
+scaled_data$Impervious_Avg <- scale(scaled_data$Impervious_Avg,
+                                  scale = TRUE)
+
+scaled_data$AgIndex_Avg <- scale(scaled_data$AgIndex_Avg,
+                                  scale = TRUE)
+
+scaled_data$Semi_Nat_Avg <- scale(scaled_data$Semi_Nat_Avg,
+                                  scale = TRUE)
+
+scaled_data$grad <- scale(scaled_data$grad,
+                                  scale = TRUE)
+scaled_data$dist <- scale(scaled_data$dist,
+                                  scale = TRUE)
+
+scaled_data$rel_abund <- abs(scaled_data$rel_abund)
+
+
+
+# Create Training Data
+input_ones <- scaled_data[which(scaled_data$Turnover == 1), ]  # all 1's
+input_zeros <- scaled_data[which(scaled_data$Turnover == 0), ]  # all 0's
+set.seed(1234)  # for repeatability of samples
+#input_ones_training_rows <- sample(1:nrow(input_ones), 0.8*nrow(input_ones))  
+#input_zeros_training_rows <- sample(1:nrow(input_zeros), 0.2*nrow(input_ones))  # 0's for training. Pick as many 0's as 1's
+
+input_ones_training_rows <- input_ones %>% 
+                            filter(pol %in% unique(input_zeros$pol) &
+                                   pla %in% unique(input_zeros$pla)) %>% 
+                            group_by(pol, pla ) %>% 
+                            slice_tail(n= 2) # 1's for training
+dim(input_ones_training_rows)
+input_zeros_training_rows <- input_zeros %>% 
+                            group_by(pol, pla ) %>% 
+                            slice_tail(n = 15) # 1's for training
+dim(input_zeros_training_rows)
+dim(input_zeros)
+
+training_ones <- semi_join(input_ones, input_ones_training_rows)
+training_zeros <- semi_join(input_zeros, input_zeros_training_rows)
+trainingData <- rbind(training_ones, training_zeros)  # row bind the 1's and 0's 
+
+#plyr::count(trainingData$landscape)
+#plyr::count(trainingData$pol)
+#plyr::count(trainingData$pla)
+#plyr::count(trainingData$site_pair)
+
+# Create Test Data
+test_ones <-anti_join(input_ones, input_ones_training_rows) %>% 
+            filter(pol %in% unique(input_zeros$pol) &
+                                   pla %in% unique(input_zeros$pla)) %>% 
+                            group_by(pol, pla ) %>% 
+                            slice_tail(n = 3)
+dim(test_ones)
+test_zeros <- anti_join(input_zeros, input_zeros_training_rows)
+dim(test_zeros)
+testData <- rbind(test_ones, test_zeros)  # row bind the 1's and 0's 
+
+
+#plyr::count(testData$landscape)
+#plyr::count(testData$pol)
+#plyr::count(testData$pla)
+#plyr::count(testData$site_pair)
+
+
+
+#first model without a random effect to see how well the prediction is using a model that behaves well
+m1.1 <- glm(Turnover ~ avg_int_freq + rel_abund + grad + AgIndex_Avg + Impervious_Avg + Plant_Origin, family = binomial(link = "logit"), data = trainingData)
+summary(m1.1)
+# good at predicting. AUC = 0.83
+
+library(lme4)
+#second model with pol random effect to see how well the prediction is with a model that behaves poorly
+m1.2 <- glmer(Turnover ~ avg_int_freq + rel_abund + grad + AgIndex_Avg + Impervious_Avg + Plant_Origin  + (1|pol) + (1|pla), family = binomial(link = "logit"), data = trainingData)
+summary(m1.2)
+# very good at predicting. AUC = 0.97
+
+#removing all the predictors to estimate how well the model predicts using just the pollinator and plant species as random effects
+m1.3 <- glmer(Turnover ~ 1 + (1|pol) + (1|pla), family = binomial(link = "logit"), data = trainingData)
+summary(m1.3)
+# very good at predicting. AUC = 0.93
+
+
+##testing performance using prediction
+predicted <- plogis(predict(m1.3, testData))  # predicted scores
+
+library(InformationValue)
+
+optCutOff <- optimalCutoff(testData$Turnover, predicted)[1]
+
+misClassError(testData$Turnover, predicted, threshold = optCutOff)
+#m7 = 0.2358
+#null = 0.5027
+
+plotROC(testData$Turnover, predicted)
+#The m7 model has area under ROC curve 83.1%, which is pretty good.
+#null has an ROC of 0.5
+
+Concordance(testData$Turnover, predicted)
+#m7 0.831
+#null 0
+
+sensitivity(testData$Turnover, predicted, threshold = optCutOff)
+#> 0.762
+specificity(testData$Turnover, predicted, threshold = optCutOff)
+#> 0.766
+
+confusionMatrix(testData$Turnover, predicted, threshold = optCutOff)
+# The columns are actuals, while rows are predicteds.
+#>       0    1
+#> 0   872  268
+#> 1   266  859
+
+
+predicted <- plogis(predict(m1.1, testData))  # predicted scores
+plotROC(testData$Turnover, predicted)
+optCutOff <- optimalCutoff(testData$Turnover, predicted)[1]
+confus1 <- confusionMatrix(testData$Turnover, predicted, threshold = optCutOff)
+
+
+predicted <- plogis(predict(m1.2, testData))  # predicted scores
+plotROC(testData$Turnover, predicted)
+optCutOff <- optimalCutoff(testData$Turnover, predicted)[1]
+confus2 <- confusionMatrix(testData$Turnover, predicted, threshold = optCutOff)
+
+predicted <- plogis(predict(m1.3, testData))  # predicted scores
+plotROC(testData$Turnover, predicted)
+optCutOff <- optimalCutoff(testData$Turnover, predicted)[1]
+confus3 <- confusionMatrix(testData$Turnover, predicted, threshold = optCutOff)
+#fairly good at predicting when an interaction won't turnover, and a good bit better than random at predicting when an interaction will turnover
+
+
+kable(cbind(cbind(confus1,confus2), confus3)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c(" " = 1,"GLM" = 2, "Mixed Effects" = 2, "Species Identity" = 2))
+
+
+#fairly good at predicting when an interaction won't turnover, and a good bit better than random at predicting when an interaction will turnover
+```
+
+
+exploring how well the model validation plots look.
+```{r}
+#for m1.1
+library(DHARMa)
+simulationOutput1 <- simulateResiduals(fittedModel = m1.1)
+(plot <- plot(simulationOutput1))
+
+#ggsave("simulateresiduals.tiff", plot, device = "tiff", dpi =300)
+
+
+# grouping data according to site
+grouping = as.factor(sample.int(410, simulationOutput1$nObs, replace = T))
+
+#set.seed(50)
+res_5.1 = recalculateResiduals(simulationOutput1, group = grouping)
+(plot <- plot(res_5.1))
+#ggsave("simulateresiduals_site.tiff", plot, device = "tiff", dpi =300)
+(plot <- testDispersion(res_5.1))
+#ggsave("simulateresiduals_site_disp.tiff", plot, device = "tiff", dpi =300)
+(plot <- testOutliers(res_5.1, type = "bootstrap"))
+#ggsave("simulateresiduals_site_outliers.tiff", device = "tiff", dpi =300)
+
+# grouping according to response shows strong overdispersion and strong quantile deviation
+
+x = predict(m1.1)
+grouping = cut(x, breaks = quantile(x, seq(0,1,0.02)))
+res_5.2 = recalculateResiduals(simulationOutput1 , group = grouping)
+(plot <- plot(res_5.2))
+#ggsave("simulateresiduals_response.tiff", plot, device = "tiff", dpi =300)
+(plot <- testDispersion(res_5.2))
+#ggsave("simulateresiduals_response_disp.tiff", plot, device = "tiff", dpi =300)
+
+#for m1.2
+
+simulationOutput1 <- simulateResiduals(fittedModel = m1.2)
+(plot <- plot(simulationOutput1))
+
+#ggsave("simulateresiduals.tiff", plot, device = "tiff", dpi =300)
+
+
+# grouping data according to site
+grouping = as.factor(sample.int(410, simulationOutput1$nObs, replace = T))
+
+#set.seed(50)
+res_5.1 = recalculateResiduals(simulationOutput1, group = grouping)
+(plot <- plot(res_5.1))
+#ggsave("simulateresiduals_site.tiff", plot, device = "tiff", dpi =300)
+(plot <- testDispersion(res_5.1))
+#ggsave("simulateresiduals_site_disp.tiff", plot, device = "tiff", dpi =300)
+(plot <- testOutliers(res_5.1, type = "bootstrap"))
+#ggsave("simulateresiduals_site_outliers.tiff", device = "tiff", dpi =300)
+
+# grouping according to response shows strong overdispersion and strong quantile deviation
+
+x = predict(m1.2)
+grouping = cut(x, breaks = quantile(x, seq(0,1,0.02)))
+res_5.2 = recalculateResiduals(simulationOutput1 , group = grouping)
+(plot <- plot(res_5.2))
+#ggsave("simulateresiduals_response.tiff", plot, device = "tiff", dpi =300)
+(plot <- testDispersion(res_5.2))
+#ggsave("simulateresiduals_response_disp.tiff", plot, device = "tiff", dpi =300)
+
+```
+
+
+plots of the effects of different variables on the likelihood of rewiring, using the non random effects model.
+```{r}
+library(ggeffects)
+library(ggplot2)
+library(forcats)
+library(cowplot)
+
+#ensuring the attributes work for the ggeffects package
+trainingData$avg_int_freq <- as.numeric(trainingData$avg_int_freq)
+trainingData$rel_abund <- as.numeric(trainingData$rel_abund)
+trainingData$grad <- as.numeric(trainingData$grad)
+trainingData$AgIndex_Avg <- as.numeric(trainingData$AgIndex_Avg)
+trainingData$Impervious_Avg <- as.numeric(trainingData$Impervious_Avg)
+trainingData$Plant_Origin <- as.factor(trainingData$Plant_Origin)
+  
+m1.1 <- glm(Turnover ~ avg_int_freq + rel_abund + grad + AgIndex_Avg + Impervious_Avg + Plant_Origin,
+            family = binomial(link = "logit"), data = trainingData)
+
+test1 <- ggpredict(m1.1, terms = c("avg_int_freq [all]"))
+(plot1 <- plot(test1, ci.style = c("ribbon"), alpha = 0.3, residuals = TRUE, dot.alpha = 0.025, show.title = FALSE))
+#ggsave("aif.tiff", plot1, device = "tiff", dpi =300)
+
+test2 <- ggpredict(m1.1, terms= c("grad [all]"))
+(plot2 <- plot(test2, ci.style = c("ribbon"), alpha = 0.3, residuals = TRUE, dot.alpha = 0.025, show.title = FALSE))
+#ggsave("grad.tiff", plot2, device = "tiff", dpi =300)
+
+test3 <- ggpredict(m1.1, terms= c("AgIndex_Avg [all]"))
+(plot3 <- plot(test3, ci.style = c("ribbon"),  alpha = 0.3, residuals = TRUE, dot.alpha = 0.025, show.title = FALSE))
+#ggsave("ra.tiff", plot3, device = "tiff", dpi =300)
+
+test4 <- ggpredict(m1.1, terms= c("Impervious_Avg"))
+(plot4 <- plot(test4, ci.style = c("ribbon"), residuals = TRUE, dot.alpha = 0.025))
+#ggsave("origin_resid.tiff", plot4, device = "tiff", dpi =300)
+
+(plot5 <- plot(test4, ci.style = c("ribbon"),  alpha = 0.3, residuals = TRUE, dot.alpha = 0.025, show.title = FALSE))
+#ggsave("origin.tiff", plot5, device = "tiff", dpi =300)
+
+test5 <- ggpredict(m1.1, terms= c("Impervious_Avg [all]", "AgIndex_Avg [0.25, 1.25, 2.25]"))
+(plot6 <- plot(test5, ci.style = c("ribbon"), residuals = TRUE, dot.alpha = 0.025, colors = c("#D752FF",  "#5CD1BF", "#DEA042")))
+#ggsave("ra_grad_origin.tiff", plot6, device = "tiff", dpi =300)
+
+
+test6 <- ggpredict(m1.1, terms= c("avg_int_freq [all]", "grad [-1, 0.5, 2]", "Plant_Origin"))
+(plot7 <- plot(test6, ci.style = c("ribbon"), residuals = TRUE, dot.alpha = 0.025, colors = c("#D752FF",  "#5CD1BF", "#DEA042")))
+#ggsave("aif_grad_origin.tiff", plot7, device = "tiff", dpi =300)
+
+
+
+test7 <- ggpredict(m1.1, terms= c("Plant_Origin"))
+(plot8 <- plot(test7, log.y = FALSE, ci.style = c("errorbar"), residuals = TRUE, dot.alpha = 0.025, show.title = FALSE))
+#ggsave("landscape.tiff", plot8, device = "tiff", dpi =300)
+
+test8 <- ggpredict(m1.2, terms= c( "avg_int_freq [all]", "pol [sample=8]"),  type = "random")
+(plot9 <- plot(test8, ci.style = c("ribbon"), alpha = 0.3, residuals = FALSE, dot.alpha = 0.025, show.title = FALSE))
+
+(comp_plot <- plot_grid(plot1, plot3, plot5, plot2,  plot8, plot9, labels = c("a", "b", "c", "d", "e", "f")))
+#ggsave("Binomial_Plot.tiff", comp_plot, device = "tiff", dpi =300, width = 30, height = 20, units = "cm")
+```
+
+
+# Species Driven Turnover Dataset Prep
+
+scaling the dataset for modelling
+```{r}
+
+#create dataset with scaled predictors to be able to predict with
+
+full_turnover$index <- 1:dim(full_turnover)[1]
+full_turnover$avg_int_freq <- scale(full_turnover$avg_int_freq,
+                                  scale = TRUE)
+
+full_turnover$grad <- scale(full_turnover$grad,
+                                  scale = TRUE)
+full_turnover$dist <- scale(full_turnover$dist,
+                                  scale = TRUE)
+
+full_turnover$abs_abund <- scale(full_turnover$abs_abund,
+                                  scale = TRUE)
+
+full_turnover$rel_abund <- scale(full_turnover$rel_abund,
+                                  scale = TRUE)
+
+full_turnover$Impervious_Avg <- scale(full_turnover$Impervious_Avg,
+                                  scale = TRUE)
+
+full_turnover$AgIndex_Avg <- scale(full_turnover$AgIndex_Avg,
+                                  scale = TRUE)
+
+full_turnover$Semi_Nat_Avg <- scale(full_turnover$Semi_Nat_Avg,
+                                  scale = TRUE)
+
+full_turnover$index <- 1:dim(full_turnover)[1]
+full_turnover$rel_abund <- abs(full_turnover$rel_abund)
+
+
+full_turnover$avg_int_freq <- as.numeric(full_turnover$avg_int_freq)
+full_turnover$rel_abund <- as.numeric(full_turnover$rel_abund)
+full_turnover$abs_abund <- as.numeric(full_turnover$abs_abund)
+full_turnover$Semi_Nat_Avg <- as.numeric(full_turnover$Semi_Nat_Avg)
+full_turnover$grad <- as.numeric(full_turnover$grad)
+full_turnover$AgIndex_Avg <- as.numeric(full_turnover$AgIndex_Avg)
+full_turnover$Impervious_Avg <- as.numeric(full_turnover$Impervious_Avg)
+full_turnover$Plant_Origin <- as.factor(full_turnover$Plant_Origin)
+
+```
+
+
+## Predicting interaction turnover due to pollinator driven turnsover
+
+
+```{r}
+# Create Training Data
+input_ones <- full_turnover[which(full_turnover$pol_turn == 1), ]  # all 1's
+dim(input_ones)
+input_zeros <- full_turnover[which(full_turnover$pol_turn == 0), ]  # all 0's
+dim(input_zeros)
+#set.seed(123)  # for repeatability of samples
+#input_ones_training_rows <- sample(1:nrow(input_ones), 0.8*nrow(input_ones))  
+#input_zeros_training_rows <- sample(1:nrow(input_zeros), 0.2*nrow(input_ones))  # 0's for training. Pick as many 0's as 1's
+
+input_ones_training_rows <- input_ones %>% 
+                            filter(site_pair %in% unique(input_zeros$site_pair)) %>% 
+                            group_by(site_pair, pol, pla) %>% 
+                            slice_sample(prop = 0.25) # 1's for training
+dim(input_ones_training_rows)
+input_zeros_training_rows <- input_zeros %>% 
+                             filter(site_pair %in% unique(input_zeros$site_pair) & 
+                                      pol %in% unique(input_ones_training_rows$pol) &
+                   pla %in% unique(input_ones_training_rows$pla)) %>% 
+                            group_by(site_pair, pol, pla) %>% 
+                            slice_sample(prop = 0.13) # 1's for training
+dim(input_zeros_training_rows)
+dim(input_zeros)
+
+training_ones <- semi_join(input_ones, input_ones_training_rows)
+training_zeros <- semi_join(input_zeros, input_zeros_training_rows)
+trainingData <- rbind(training_ones, training_zeros)  # row bind the 1's and 0's 
+
+#plyr::count(trainingData$landscape)
+plyr::count(trainingData$pol)
+plyr::count(trainingData$pla)
+plyr::count(trainingData$site_pair)
+
+# Create Test Data
+test_ones <- anti_join(input_ones, input_ones_training_rows) %>% 
+             filter(site_pair %in% unique(trainingData$site_pair) &
+                   pol %in% unique(trainingData$pol) &
+                   pla %in% unique(trainingData$pla)) 
+dim(test_ones)
+test_zeros <- anti_join(input_zeros, input_zeros_training_rows) %>% 
+          filter(site_pair %in% unique(trainingData$site_pair) &
+                   pol %in% unique(trainingData$pol) &
+                   pla %in% unique(trainingData$pla)) %>% 
+            group_by(site_pair, pol, pla) %>% 
+                            slice_sample(prop = 0.34)
+dim(test_zeros)
+testData <- rbind(test_ones, test_zeros)  # row bind the 1's and 0's 
+
+
+#plyr::count(testData$landscape)
+plyr::count(testData$pol)
+plyr::count(testData$pla)
+plyr::count(testData$site_pair)
+
+#first model without a random effect to see how well the prediction is using a model that behaves well
+m2.1 <- glm(pol_turn ~ avg_int_freq + grad + Impervious_Avg*AgIndex_Avg, family = binomial(link = "logit"), data = trainingData)
+summary(m2.1)
+#not good at predicting. AUC = 0.62
+
+#second model with pol random effect to see how well the prediction is with a model that behaves poorly
+m2.2 <- glmer(pol_turn ~ avg_int_freq + grad + Impervious_Avg*AgIndex_Avg + (1|pol), family = binomial(link = "logit"), data = trainingData)
+summary(m2.2)
+#much better at predicting. AUC = 0.826
+
+#Introducing an observation level random effect to remove ensure the model behaves well but cannot use for prediction as the index values cannot be extended to the test data.
+m2.3 <- glmer(pol_turn ~ 1 + (1 |pol), family = binomial(link = "logit"), data = trainingData)
+summary(m2.3)
+#very good at predicting. AUC = 0.8276
+
+
+## moving onto predictions
+predicted <- plogis(predict(m2.1, testData))  # predicted scores
+
+library(InformationValue)
+
+optCutOff <- optimalCutoff(testData$pol_turn, predicted)[1]
+
+misClassError(testData$pol_turn, predicted, threshold = optCutOff)
+#m6 = 0.2155
+#null = 0.5027
+
+plotROC(testData$pol_turn, predicted)
+#The m6 model has area under ROC curve 85.65%, which is pretty good.
+#null has an ROC of 0.5
+
+Concordance(testData$pol_turn, predicted)
+#m7 0.85
+#null 0
+
+sensitivity(testData$pol_turn, predicted, threshold = optCutOff)
+#> 0.792
+specificity(testData$pol_turn, predicted, threshold = optCutOff)
+#> 0.777
+
+confusionMatrix(testData$pol_turn, predicted, threshold = optCutOff)
+# The columns are actuals, while rows are predicteds.
+#>       0     1
+#> 0   9048  2144
+#> 1   2585  8165
+
+
+predicted <- plogis(predict(m2.1, testData))  # predicted scores
+plotROC(testData$pol_turn, predicted)
+optCutOff <- optimalCutoff(testData$pol_turn, predicted)[1]
+confus1 <- confusionMatrix(testData$pol_turn, predicted, threshold = optCutOff)
+
+predicted <- plogis(predict(m2.2, testData))  # predicted scores
+plotROC(testData$pol_turn, predicted)
+optCutOff <- optimalCutoff(testData$pol_turn, predicted)[1]
+confus2 <- confusionMatrix(testData$pol_turn, predicted, threshold = optCutOff)
+
+predicted <- plogis(predict(m2.3, testData))  # predicted scores
+plotROC(testData$pol_turn, predicted)
+optCutOff <- optimalCutoff(testData$pol_turn, predicted)[1]
+confus3 <- confusionMatrix(testData$pol_turn, predicted, threshold = optCutOff)
+#fairly good at predicting when an interaction won't turnover, and a good bit better than random at predicting when an interaction will turnover
+
+
+
+kable(cbind(cbind(confus1,confus2), confus3)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c(" " = 1,"GLM" = 2, "Mixed Effects" = 2, "Species Identity" = 2))
+```
+
+
+exploring how well the model validation plots look.
+```{r}
+
+simulationOutput2 <- simulateResiduals(fittedModel = m2.1)
+(plot <- plot(simulationOutput2))
+
+
+
+# grouping data according to site
+grouping = as.factor(sample.int(309, simulationOutput2$nObs, replace = T))
+
+#set.seed(50)
+res_5.1 = recalculateResiduals(simulationOutput2, group = grouping)
+(plot <- plot(res_5.1))
+(plot <- testDispersion(res_5.1))
+(plot <- testOutliers(res_5.1, type = "bootstrap"))
+
+
+# grouping according to response shows strong overdispersion and strong quantile deviation
+
+x = predict(m2.1)
+grouping = cut(x, breaks = quantile(x, seq(0,1,0.02)))
+res_5.2 = recalculateResiduals(simulationOutput2 , group = grouping)
+(plot <- plot(res_5.2))
+(plot <- testDispersion(res_5.2))
+
+
+
+
+
+simulationOutput2 <- simulateResiduals(fittedModel = m2.2)
+(plot <- plot(simulationOutput2))
+
+# grouping data according to site
+grouping = as.factor(sample.int(309, simulationOutput2$nObs, replace = T))
+
+#set.seed(50)
+res_5.1 = recalculateResiduals(simulationOutput2, group = grouping)
+(plot <- plot(res_5.1))
+(plot <- testDispersion(res_5.1))
+(plot <- testOutliers(res_5.1, type = "bootstrap"))
+
+
+# grouping according to response shows strong overdispersion and strong quantile deviation
+
+x = predict(m2.2)
+grouping = cut(x, breaks = quantile(x, seq(0,1,0.02)))
+res_5.2 = recalculateResiduals(simulationOutput2 , group = grouping)
+(plot <- plot(res_5.2))
+
+(plot <- testDispersion(res_5.2))
+
+
+```
+
+
+
+## Predicting interaction turnover due to plant driven turnsover
+
+
+How well can we predict when an plant will turnover?
+```{r}
+
+# Create Training Data
+input_ones <- full_turnover[which(full_turnover$plant_turn == 1), ]  # all 1's
+dim(input_ones)
+input_zeros <- full_turnover[which(full_turnover$plant_turn == 0), ]  # all 0's
+dim(input_zeros)
+set.seed(123)  # for repeatability of samples
+#input_ones_training_rows <- sample(1:nrow(input_ones), 0.8*nrow(input_ones))  
+#input_zeros_training_rows <- sample(1:nrow(input_zeros), 0.2*nrow(input_ones))  # 0's for training. Pick as many 0's as 1's
+
+input_ones_training_rows <- input_ones %>% 
+                            filter(site_pair %in% unique(input_zeros$site_pair)) %>% 
+                            group_by(site_pair, pol, pla) %>% 
+                            slice_sample(prop = 0.25) # 1's for training
+dim(input_ones_training_rows)
+input_zeros_training_rows <- input_zeros %>% 
+                             filter(site_pair %in% unique(input_zeros$site_pair) & 
+                                      pol %in% unique(input_ones_training_rows$pol) &
+                   pla %in% unique(input_ones_training_rows$pla)) %>% 
+                            group_by(site_pair, pol, pla) %>% 
+                            slice_sample(prop = 0.28) # 1's for training
+dim(input_zeros_training_rows)
+dim(input_zeros)
+
+training_ones <- semi_join(input_ones, input_ones_training_rows)
+training_zeros <- semi_join(input_zeros, input_zeros_training_rows)
+trainingData <- rbind(training_ones, training_zeros)  # row bind the 1's and 0's 
+
+#plyr::count(trainingData$landscape)
+plyr::count(trainingData$pol)
+plyr::count(trainingData$pla)
+plyr::count(trainingData$site_pair)
+
+# Create Test Data
+test_ones <- anti_join(input_ones, input_ones_training_rows) %>% 
+             filter(site_pair %in% unique(trainingData$site_pair) &
+                   pol %in% unique(trainingData$pol) &
+                   pla %in% unique(trainingData$pla))  %>% 
+                   group_by(site_pair, pol, pla) %>% 
+                            slice_sample(prop = 0.25) 
+dim(test_ones)
+test_zeros <- anti_join(input_zeros, input_zeros_training_rows) %>% 
+          filter(site_pair %in% unique(trainingData$site_pair) &
+                   pol %in% unique(trainingData$pol) &
+                   pla %in% unique(trainingData$pla)) %>% 
+                   group_by(site_pair, pol, pla) %>% 
+                            slice_sample(prop = 0.25)
+
+dim(test_zeros)
+testData <- rbind(test_ones, test_zeros)  # row bind the 1's and 0's 
+
+
+#plyr::count(testData$landscape)
+plyr::count(testData$pol)
+plyr::count(testData$pla)
+plyr::count(testData$site_pair)
+
+####### Modelling
+
+#first model without a random effect to see how well the prediction is using a model that behaves well
+m3.1 <- glm(plant_turn ~  grad + dist + Impervious_Avg * AgIndex_Avg , family = binomial(link = "logit"), data = trainingData)
+summary(m3.1)
+#not good at predicting. AUC = 0.6479
+
+#second model with pol random effect to see how well the prediction is with a model that behaves poorly
+m3.2 <- glmer(plant_turn ~  grad + Impervious_Avg * AgIndex_Avg + Plant_Origin + (1|site_pair) + (1|pol) + (1|pla), family = binomial(link = "logit"), data = trainingData)
+summary(m3.2)
+#much better at predicting. AUC = 0.9132
+
+#Introducing an observation level random effect to remove ensure the model behaves well but cannot use for prediction as the index values cannot be extended to the test data.
+m3.3 <- glmer(plant_turn ~  1 + (1|site_pair) + (1|pol) + (1|pla), family = binomial(link = "logit"), data = trainingData)
+summary(m3.3)
+#very good at predicting. AUC = 0.9132
+
+##no really useful information from landscape or gradient.
+
+
+#### Prediction
+
+predicted <- plogis(predict(m3.1, testData))  # predicted scores
+
+library(InformationValue)
+
+optCutOff <- optimalCutoff(testData$plant_turn, predicted)[1]
+
+misClassError(testData$plant_turn, predicted, threshold = optCutOff)
+#m6 = 0.1671
+#null = 0.5027
+
+plotROC(testData$plant_turn, predicted)
+#The m6 model has area under ROC curve 91.32%, which is pretty good.
+#null has an ROC of 0.5
+
+Concordance(testData$plant_turn, predicted)
+#m7 0.913
+#null 0
+
+sensitivity(testData$plant_turn, predicted, threshold = optCutOff)
+#> 0.806
+specificity(testData$plant_turn, predicted, threshold = optCutOff)
+#> 0.858
+
+confusionMatrix(testData$plant_turn, predicted, threshold = optCutOff)
+# The columns are actuals, while rows are predicteds.
+#>       0     1
+#> 0   5591  1209
+#> 1    923  5038
+
+#fairly good at predicting when an interaction won't turnover, and a good bit better than random at predicting when an interaction will turnover
+
+
+predicted <- plogis(predict(m3.1, testData))  # predicted scores
+plotROC(testData$plant_turn, predicted)
+optCutOff <- optimalCutoff(testData$plant_turn, predicted)[1]
+confus1 <- confusionMatrix(testData$plant_turn, predicted, threshold = optCutOff)
+
+predicted <- plogis(predict(m3.2, testData))  # predicted scores
+plotROC(testData$plant_turn, predicted)
+optCutOff <- optimalCutoff(testData$plant_turn, predicted)[1]
+confus2 <- confusionMatrix(testData$plant_turn, predicted, threshold = optCutOff)
+
+predicted <- plogis(predict(m3.3, testData))  # predicted scores
+plotROC(testData$plant_turn, predicted)
+optCutOff <- optimalCutoff(testData$plant_turn, predicted)[1]
+confus3 <- confusionMatrix(testData$plant_turn, predicted, threshold = optCutOff)
+#fairly good at predicting when an interaction won't turnover, and a good bit better than random at predicting when an interaction will turnover
+
+
+
+kable(cbind(cbind(confus1,confus2), confus3)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c(" " = 1,"GLM" = 2, "Mixed Effects" = 2, "Species Identity" = 2))
+```
+
+
+
+exploring how well the model validation plots look.
+```{r}
+
+simulationOutput3 <- simulateResiduals(fittedModel = m3.1)
+(plot <- plot(simulationOutput3))
+
+
+# grouping data according to site
+grouping = as.factor(sample.int(333, simulationOutput3$nObs, replace = T))
+
+
+res_5.1 = recalculateResiduals(simulationOutput3, group = grouping)
+(plot <- plot(res_5.1))
+(plot <- testDispersion(res_5.1))
+(plot <- testOutliers(res_5.1, type = "bootstrap"))
+
+# grouping according to response shows strong overdispersion and strong quantile deviation
+
+x = predict(m3.1)
+grouping = cut(x, breaks = quantile(x, seq(0,1,0.02)))
+res_5.2 = recalculateResiduals(simulationOutput3 , group = grouping)
+(plot <- plot(res_5.2))
+(plot <- testDispersion(res_5.2))
+
+
+```
+
+
+
+
+## Predicting interaction turnover due to  both plant and pollinator turnsover (both turnover)
+
+
+How well can we predict when a plant and pollinator will turnover?
+```{r}
+# Create Training Data
+input_ones <- full_turnover[which(full_turnover$both_turn == 1), ]  # all 1's
+dim(input_ones)
+input_zeros <- full_turnover[which(full_turnover$both_turn == 0), ]  # all 0's
+dim(input_zeros)
+#set.seed(123)  # for repeatability of samples
+#input_ones_training_rows <- sample(1:nrow(input_ones), 0.8*nrow(input_ones))  
+#input_zeros_training_rows <- sample(1:nrow(input_zeros), 0.2*nrow(input_ones))  # 0's for training. Pick as many 0's as 1's
+
+input_ones_training_rows <- input_ones %>% 
+                            filter(site_pair %in% unique(input_zeros$site_pair)) %>% 
+                            group_by(site_pair, pol, pla) %>% 
+                            slice_sample(prop = 0.25) # 1's for training
+dim(input_ones_training_rows)
+input_zeros_training_rows <- input_zeros %>% 
+                             filter(site_pair %in% unique(input_zeros$site_pair) & 
+                                      pol %in% unique(input_ones_training_rows$pol) &
+                   pla %in% unique(input_ones_training_rows$pla)) %>% 
+                            group_by(site_pair, pol, pla) %>% 
+                            slice_sample(prop = 0.1) # 1's for training
+dim(input_zeros_training_rows)
+dim(input_zeros)
+
+training_ones <- semi_join(input_ones, input_ones_training_rows)
+training_zeros <- semi_join(input_zeros, input_zeros_training_rows)
+trainingData <- rbind(training_ones, training_zeros)  # row bind the 1's and 0's 
+
+#plyr::count(trainingData$landscape)
+plyr::count(trainingData$pol)
+plyr::count(trainingData$pla)
+plyr::count(trainingData$site_pair)
+
+# Create Test Data
+test_ones <- anti_join(input_ones, input_ones_training_rows) %>% 
+             filter(site_pair %in% unique(trainingData$site_pair) &
+                   pol %in% unique(trainingData$pol) &
+                   pla %in% unique(trainingData$pla))  %>% 
+                   group_by(site_pair, pol, pla) %>% 
+                            slice_sample(prop = 0.5) 
+dim(test_ones)
+test_zeros <- anti_join(input_zeros, input_zeros_training_rows) %>% 
+          filter(site_pair %in% unique(trainingData$site_pair) &
+                   pol %in% unique(trainingData$pol) &
+                   pla %in% unique(trainingData$pla)) %>% 
+                   group_by(site_pair, pol, pla) %>% 
+                            slice_sample(prop = 0.15)
+
+dim(test_zeros)
+testData <- rbind(test_ones, test_zeros)  # row bind the 1's and 0's 
+
+
+#plyr::count(testData$landscape)
+plyr::count(testData$pol)
+plyr::count(testData$pla)
+plyr::count(testData$site_pair)
+
+
+####### Modelling
+
+#first model without a random effect to see how well the prediction is using a model that behaves well
+m4.1 <- glm(both_turn ~  grad + dist + Impervious_Avg * AgIndex_Avg , family = binomial(link = "logit"), data = trainingData)
+summary(m4.1)
+#not good at predicting. AUC = 0.5793
+
+#second model with pol random effect to see how well the prediction is with a model that behaves poorly
+m4.2 <- glmer(both_turn ~ dist + Impervious_Avg * AgIndex_Avg  + (1|site_pair) + (1|pol) + (1|pla), family = binomial(link = "logit"), data = trainingData)
+summary(m4.2)
+#much better at predicting. AUC = 0.8642
+
+#Introducing an observation level random effect to remove ensure the model behaves well but cannot use for prediction as the index values cannot be extended to the test data.
+m4.3 <- glmer(both_turn ~  1 + (1|site_pair) + (1|pol) + (1|pla), family = binomial(link = "logit"), data = trainingData)
+summary(m4.3)
+#very good at predicting. AUC = 0.8657
+
+##no really useful information from landscape or gradient.
+
+
+#### Prediction
+
+
+
+predicted <- plogis(predict(m4.1, testData))  # predicted scores
+
+library(InformationValue)
+
+optCutOff <- optimalCutoff(testData$both_turn, predicted)[1]
+
+misClassError(testData$both_turn, predicted, threshold = optCutOff)
+#m6 = 0.208
+#null = 0.5027
+
+plotROC(testData$both_turn, predicted)
+#The m6 model has area under ROC curve 86.42%, which is pretty good.
+#null has an ROC of 0.5
+
+Concordance(testData$both_turn, predicted)
+#m7 0.872
+#null 0
+
+sensitivity(testData$both_turn, predicted, threshold = optCutOff)
+#> 0.889
+specificity(testData$both_turn, predicted, threshold = optCutOff)
+#> 0.69
+
+confusionMatrix(testData$both_turn, predicted, threshold = optCutOff)
+# The columns are actuals, while rows are predicteds.
+#>       0     1
+#> 0   1959  317
+#> 1    868  2548
+
+#fairly good at predicting when an interaction won't turnover, and a good bit better than random at predicting when an interaction will turnover
+
+predicted <- plogis(predict(m4.1, testData))  # predicted scores
+plotROC(testData$both_turn, predicted)
+optCutOff <- optimalCutoff(testData$both_turn, predicted)[1]
+confus1 <- confusionMatrix(testData$both_turn, predicted, threshold = optCutOff)
+
+predicted <- plogis(predict(m4.2, testData))  # predicted scores
+plotROC(testData$both_turn, predicted)
+optCutOff <- optimalCutoff(testData$both_turn, predicted)[1]
+confus2 <- confusionMatrix(testData$both_turn, predicted, threshold = optCutOff)
+
+predicted <- plogis(predict(m4.3, testData))  # predicted scores
+plotROC(testData$both_turn, predicted)
+optCutOff <- optimalCutoff(testData$both_turn, predicted)[1]
+confus3 <- confusionMatrix(testData$both_turn, predicted, threshold = optCutOff)
+#fairly good at predicting when an interaction won't turnover, and a good bit better than random at predicting when an interaction will turnover
+
+
+
+kable(cbind(cbind(confus1,confus2), confus3)) %>% 
+    kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+     add_header_above(c(" " = 1,"GLM" = 2, "Mixed Effects" = 2, "Species Identity" = 2))
+```
+
+
+exploring how well the model validation plots look.
+```{r}
+simulationOutput4 <- simulateResiduals(fittedModel = m4.3)
+(plot <- plot(simulationOutput4))
+
+# grouping data according to site
+grouping = as.factor(sample.int(235, simulationOutput4$nObs, replace = T))
+
+res_5.1 = recalculateResiduals(simulationOutput4, group = grouping)
+(plot <- plot(res_5.1))
+(plot <- testDispersion(res_5.1))
+(plot <- testOutliers(res_5.1, type = "bootstrap"))
+
+
+# grouping according to response shows strong overdispersion and strong quantile deviation
+
+x = predict(m4.3)
+grouping = cut(x, breaks = quantile(x, seq(0,1,0.02)))
+res_5.2 = recalculateResiduals(simulationOutput4 , group = grouping)
+(plot <- plot(res_5.2))
+(plot <- testDispersion(res_5.2))
+
+simulationOutput4$nObs
+
+```
+
